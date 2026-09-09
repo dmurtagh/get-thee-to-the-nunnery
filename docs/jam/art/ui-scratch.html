@@ -1,0 +1,913 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Nunnery — UI scratch</title>
+<style>
+  html, body { margin: 0; background: #0a0b14; color: #f4f0e6; font: 12px/1.4 -apple-system, Helvetica, Arial, sans-serif; }
+  #root { width: 960px; margin: 0 auto; padding: 16px 0 40px; }
+  .lbl { color: #ffb347; font-weight: bold; margin: 22px 0 6px; }
+  canvas { display: block; outline: 1px solid rgba(244,240,230,0.15); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+'use strict';
+
+// NOTE: the PALETTE + SPRITES block below is copied verbatim from sprites-scratch.html so this page is self-contained.
+// ============================================================================
+// ==== PALETTE  (design doc §11, plus the additions listed in the notes below)
+// ============================================================================
+const P = {
+  // §11 palette
+  floor: '#1b1f3a', floorLine: '#151830', border: '#5a6078', amber: '#ffb347',
+  green: '#7bd389', greenShade: '#4f9a5c', bone: '#f4f0e6', ghost: '#8fe3ff',
+  muzzle: '#fff3c4', cream: '#f4f0e6', purple: '#7b3fa0', gold: '#ffd166', brass: '#d9a441',
+  // additions (see notes)
+  ink: '#07070d',            // the 2px outline on everything
+  habit: '#262633',          // nun's habit: charcoal, NOT pure black, so it separates from the floor
+  habitHi: '#3c3c4e',        // habit highlight tone
+  skin: '#f2c29b',           // nun's face and hands
+  eye: '#14141c',
+  shoe: '#111118',
+  gunDark: '#2b2e3a', gunHi: '#4d515f', stock: '#6b4226', stockHi: '#8a5a34', pump: '#8a8f9c',
+  boneShade: '#cfc9ba',
+  greyGreen: '#8a9c8c', greyGreenShade: '#5d6f60',   // Gravedigger
+  purpleShade: '#56297a', paleFace: '#d8c3e0',        // Claudius
+  ghostShade: '#5fb5d6',
+  heart: '#e0475a', heartHi: '#ff8a96',
+  brassDark: '#a87a2c',
+  borderHi: '#7c8398', gateDark: '#0d0f1c',
+  shadow: 'rgba(0,0,0,0.35)',
+};
+
+// ============================================================================
+// ==== SPRITES  (liftable: every function is self-contained + these 4 helpers)
+// Pivot: (x, y) is the FEET (bottom-centre) unless noted. s = scale, 1 = in-game size.
+// All geometry is in local units; ctx.scale(s) makes the 2px outline scale too.
+// ============================================================================
+const TAU = Math.PI * 2;
+
+function shadow(ctx, x, y, rx, ry) {
+  ctx.fillStyle = P.shadow; ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, TAU); ctx.fill();
+}
+function ell(ctx, x, y, rx, ry, fill, stroke, lw, rot) {
+  ctx.beginPath(); ctx.ellipse(x, y, rx, ry, rot || 0, 0, TAU);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.lineWidth = lw || 2; ctx.strokeStyle = stroke; ctx.stroke(); }
+}
+function rrect(ctx, x, y, w, h, r, fill, stroke, lw) {
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.lineWidth = lw || 2; ctx.strokeStyle = stroke; ctx.stroke(); }
+}
+// outlined thick line (limbs): ink underlay then colour
+function limb(ctx, x1, y1, x2, y2, w, colour) {
+  ctx.lineCap = 'round';
+  ctx.lineWidth = w + 3; ctx.strokeStyle = P.ink; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  ctx.lineWidth = w; ctx.strokeStyle = colour; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  ctx.lineCap = 'butt';
+}
+
+// ---------------------------------------------------------------- THE NUN
+// o = { facing: 1|-1 (flip when aim crosses vertical), lean: radians around the feet, walk: 0|1 }
+// Height ~31 px at s=1 (feet to veil top). Hand pivot for the gun: NUN_HAND.
+const NUN_HAND = { x: 2.5, y: -14.5 };
+function drawNun(ctx, x, y, s, o) {
+  o = o || {};
+  const facing = o.facing || 1, walk = o.walk || 0;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s * facing, s);
+  if (o.shadow !== false) shadow(ctx, 0, 0, 9, 3);
+  ctx.rotate(o.lean || 0);
+  ctx.lineJoin = 'round';
+  // shoes
+  const step = walk ? 1.5 : 0;
+  rrect(ctx, -7 + step, -3.2, 5.5, 3.2, 1.2, P.shoe, P.ink, 1);
+  rrect(ctx, 1.5 - step, -3.2, 5.5, 3.2, 1.2, P.shoe, P.ink, 1);
+  // veil (behind everything): cap over the head, trailing to the shoulders
+  ctx.beginPath();
+  ctx.moveTo(-9, -12);
+  ctx.quadraticCurveTo(-10.2, -22, -7.6, -26.8);
+  ctx.quadraticCurveTo(-3.6, -31.4, 0, -31.4);
+  ctx.quadraticCurveTo(3.6, -31.4, 7.6, -26.8);
+  ctx.quadraticCurveTo(10.2, -22, 9, -12);
+  ctx.quadraticCurveTo(0, -10, -9, -12);
+  ctx.closePath();
+  ctx.fillStyle = P.habit; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = P.ink; ctx.stroke();
+  // habit: bell
+  ctx.beginPath();
+  ctx.moveTo(-5.2, -18.5); ctx.lineTo(5.2, -18.5);
+  ctx.quadraticCurveTo(9, -11, 9.8, -1.5);
+  ctx.quadraticCurveTo(0, 0.6, -9.8, -1.5);
+  ctx.quadraticCurveTo(-9, -11, -5.2, -18.5);
+  ctx.closePath();
+  ctx.fillStyle = P.habit; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = P.ink; ctx.stroke();
+  // habit highlight (light from upper-left)
+  ctx.beginPath();
+  ctx.moveTo(-4.4, -17.5);
+  ctx.quadraticCurveTo(-7.6, -11, -8.2, -2.8);
+  ctx.lineTo(-5.6, -2.6);
+  ctx.quadraticCurveTo(-5.6, -11, -2.4, -17.5);
+  ctx.closePath();
+  ctx.fillStyle = P.habitHi; ctx.fill();
+  // scapular strip
+  rrect(ctx, -2.1, -17.8, 4.2, 15.3, 0.6, P.bone, P.ink, 1);
+  // gold cross
+  ctx.fillStyle = P.gold;
+  ctx.fillRect(-0.75, -15.6, 1.5, 5.2);
+  ctx.fillRect(-2.4, -14.2, 4.8, 1.5);
+  // coif ring (white, wider than the head) — THE nun silhouette
+  ell(ctx, 0, -22, 6.7, 7, P.bone, P.ink, 2);
+  // face
+  ell(ctx, 0, -21.6, 3.9, 4.7, P.skin);
+  // eyes + deadpan mouth
+  ctx.fillStyle = P.eye;
+  ctx.fillRect(-2.4, -22.9, 1.5, 1.7);
+  ctx.fillRect(0.9, -22.9, 1.5, 1.7);
+  ctx.fillRect(-0.8, -19.4, 1.6, 0.8);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- THE SHOTGUN
+// (x, y) = pivot at the nun's hand. angle in radians (canvas coords, +y down).
+// pumpOffset 0..1: 0 = forward/ready, 1 = fully racked back (5 px). Muzzle at local (GUN_MUZZLE, 0).
+// Too long on purpose: 38.5 px at s=1 (~1.25x the nun).
+const GUN_MUZZLE = 28;
+function drawGun(ctx, x, y, s, angle, pumpOffset) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s, s);
+  ctx.rotate(angle);
+  if (Math.cos(angle) < 0) ctx.scale(1, -1);   // keep the stock hanging down when aiming left
+  ctx.lineJoin = 'round';
+  // stock
+  ctx.beginPath();
+  ctx.moveTo(-1, -2); ctx.lineTo(-1, 2.2); ctx.lineTo(-10, 4.6); ctx.lineTo(-10.5, 1); ctx.closePath();
+  ctx.fillStyle = P.stock; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = P.ink; ctx.stroke();
+  ctx.strokeStyle = P.stockHi; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(-2, -0.6); ctx.lineTo(-9, 1.6); ctx.stroke();
+  // rear hand at the grip
+  ell(ctx, 0.5, 2, 2, 1.7, P.skin, P.ink, 1);
+  // receiver
+  rrect(ctx, -2, -2.4, 10, 4.8, 1, P.gunDark, P.ink, 2);
+  // barrel
+  rrect(ctx, 7, -1.6, GUN_MUZZLE - 7, 3.2, 0.6, P.gunDark, P.ink, 2);
+  ctx.fillStyle = P.gunHi; ctx.fillRect(8, -1.4, GUN_MUZZLE - 9, 1);
+  // muzzle cap
+  rrect(ctx, GUN_MUZZLE - 2, -2.1, 2.4, 4.2, 0.6, P.pump, P.ink, 1.5);
+  // pump block + front hand
+  const px = 13 - 5 * (pumpOffset || 0);
+  rrect(ctx, px, -2.6, 7, 5.2, 1, P.pump, P.ink, 2);
+  ell(ctx, px + 3.5, 1.6, 2.1, 1.7, P.skin, P.ink, 1);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- THE RESTLESS (and the Ghost body)
+// frame 0|1 = 2-frame walk. ~26 px tall. Faces +x; flip with ctx.scale(-1,1) around x.
+function drawRestlessBody(ctx, frame, pal, ghost) {
+  ctx.lineJoin = 'round';
+  if (!ghost) {
+    shadow(ctx, 0, 0, 8, 2.6);
+    // legs: apart / together
+    const xs = frame ? [-3.2, -0.2] : [-5.5, 1.5];
+    for (const lx of xs) {
+      rrect(ctx, lx, -7.5, 3, 7.5, 1, pal.shade, P.ink, 1.5);
+      rrect(ctx, lx - 0.5, -1.8, 4.2, 1.8, 0.6, P.shoe, P.ink, 1);
+    }
+  } else {
+    // wavy floating hem instead of legs
+    const w = frame ? 1.5 : -1.5;
+    ctx.beginPath();
+    ctx.moveTo(-6.2, -6);
+    ctx.quadraticCurveTo(-8, -1 + w, -5.5, 1.5);
+    ctx.quadraticCurveTo(-2.5, -1 - w, 0, 1.5);
+    ctx.quadraticCurveTo(2.5, -1 + w, 5.5, 1.5);
+    ctx.quadraticCurveTo(8, -1 - w, 6.2, -6);
+    ctx.closePath();
+    ctx.fillStyle = pal.shade; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = P.ink; ctx.stroke();
+  }
+  // back arm (hanging forward, zombie style)
+  limb(ctx, -1, -13.5, 4.5, -3.5, 3, pal.shade);
+  ell(ctx, 4.8, -3, 1.9, 1.7, pal.base, P.ink, 1);
+  // hunched torso
+  ctx.beginPath();
+  ctx.moveTo(-6, -6);
+  ctx.quadraticCurveTo(-8.5, -13, -3, -16.5);
+  ctx.lineTo(5.5, -16.5);
+  ctx.quadraticCurveTo(8, -11, 6, -6);
+  ctx.quadraticCurveTo(0, -4.5, -6, -6);
+  ctx.closePath();
+  ctx.fillStyle = pal.base; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = P.ink; ctx.stroke();
+  // shade tone on the right
+  ctx.beginPath();
+  ctx.moveTo(3, -16.2);
+  ctx.quadraticCurveTo(7.6, -11, 5.8, -6.3);
+  ctx.lineTo(2.4, -5.7);
+  ctx.quadraticCurveTo(4.8, -11, 3, -16.2);
+  ctx.closePath();
+  ctx.fillStyle = pal.shade; ctx.fill();
+  // front arm
+  limb(ctx, 4, -13.5, 9, -4, 3, pal.shade);
+  ell(ctx, 9.3, -3.5, 1.9, 1.7, pal.base, P.ink, 1);
+  // Elizabethan ruff: scallops then disc
+  const rx0 = 2.5, ry0 = -16.6;
+  ctx.fillStyle = pal.ruff; ctx.strokeStyle = P.ink; ctx.lineWidth = 1;
+  for (let i = 0; i < 9; i++) {
+    const a = (i / 9) * TAU;
+    ctx.beginPath(); ctx.ellipse(rx0 + Math.cos(a) * 6, ry0 + Math.sin(a) * 2.4, 1.7, 1.5, 0, 0, TAU); ctx.fill(); ctx.stroke();
+  }
+  ell(ctx, rx0, ry0, 6, 2.3, pal.ruff, P.ink, 1);
+  // head, tilted forward
+  ell(ctx, 4.5, -21, 4.7, 4.2, pal.base, P.ink, 2, 0.35);
+  // hair tufts
+  ctx.fillStyle = P.ink;
+  ctx.fillRect(1.6, -25.4, 1, 2.2); ctx.fillRect(3.6, -26, 1, 2.6); ctx.fillRect(5.8, -25.6, 1, 2);
+  // sunken sockets + mouth
+  ell(ctx, 3.1, -21.6, 1.4, 1.5, P.ink);
+  ell(ctx, 6.4, -21, 1.4, 1.5, P.ink);
+  ctx.fillRect(5, -18.9, 2.4, 1);
+}
+const PAL_RESTLESS = { base: P.green, shade: P.greenShade, ruff: P.bone };
+function drawRestless(ctx, x, y, s, frame) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  drawRestlessBody(ctx, frame, PAL_RESTLESS, false);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- THE GHOST (SHOULD)
+// 50%-alpha cyan Restless silhouette, no shadow, no legs, crown outline, wavers by frame.
+const PAL_GHOST = { base: P.ghost, shade: P.ghostShade, ruff: '#dff7ff' };
+function drawGhost(ctx, x, y, s, frame) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  ctx.globalAlpha = 0.5;
+  ctx.transform(1, 0, frame ? 0.08 : -0.08, 1, 0, 0);   // waver: tiny shear
+  drawRestlessBody(ctx, frame, PAL_GHOST, true);
+  // crown outline on the head
+  ctx.lineWidth = 1.4; ctx.strokeStyle = P.gold; ctx.lineJoin = 'miter';
+  ctx.beginPath();
+  ctx.moveTo(1.2, -24.2); ctx.lineTo(1.2, -28); ctx.lineTo(3.2, -26); ctx.lineTo(4.8, -29); ctx.lineTo(6.4, -26); ctx.lineTo(8.4, -28); ctx.lineTo(8.4, -24.2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- YORICK (skull)
+// frame 0|1 = jaw shut / jaw chattering open. ~15 px tall.
+function drawYorick(ctx, x, y, s, frame) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  ctx.lineJoin = 'round';
+  shadow(ctx, 0, 0, 5, 1.7);
+  const jaw = frame ? 1.6 : 0;
+  // jaw
+  rrect(ctx, -4.2, -6 + jaw, 8.4, 4, 1.2, P.bone, P.ink, 1.5);
+  ctx.fillStyle = P.ink;
+  for (const tx of [-2.6, -0.6, 1.4]) ctx.fillRect(tx, -6 + jaw, 1.1, 1.6);
+  // cranium
+  ell(ctx, 0, -9.8, 6.2, 5.6, P.bone, P.ink, 2);
+  // shade tone on the right
+  ctx.beginPath();
+  ctx.moveTo(2.2, -14.8);
+  ctx.quadraticCurveTo(7.4, -11.5, 4.6, -5.2);
+  ctx.quadraticCurveTo(4.4, -9.5, 2.2, -14.8);
+  ctx.closePath();
+  ctx.fillStyle = P.boneShade; ctx.fill();
+  // sockets + nose
+  ell(ctx, -2.5, -10.2, 1.8, 2, P.ink);
+  ell(ctx, 2.5, -10.2, 1.8, 2, P.ink);
+  ctx.fillStyle = P.ink; ctx.beginPath(); ctx.moveTo(0, -8.4); ctx.lineTo(-0.9, -6.6); ctx.lineTo(0.9, -6.6); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- BRUTE (Gravedigger / Claudius)
+// ~50 px tall at k=1 (plus the shovel over the shoulder). frame 0|1 = lumbering step.
+// pal = { base, shade, head }, accessory = 'shovel' | 'goblet', crown = bool
+function drawBrute(ctx, frame, pal, accessory, crown) {
+  ctx.lineJoin = 'round';
+  const bob = frame ? 1.2 : 0;
+  shadow(ctx, 0, 0, 17, 5);
+  // legs
+  const xs = frame ? [-9.5, 1] : [-12, 3.5];
+  for (const lx of xs) {
+    rrect(ctx, lx, -11, 8.5, 11, 2, pal.shade, P.ink, 2);
+    rrect(ctx, lx - 0.8, -3, 10, 3, 1, P.shoe, P.ink, 1.2);
+  }
+  ctx.translate(0, -bob);
+  // shovel handle behind (over the shoulder)
+  if (accessory === 'shovel') {
+    limb(ctx, 19, -14, -3, -52, 3, P.stock);
+    ctx.beginPath(); ctx.moveTo(-9, -60); ctx.lineTo(0, -58); ctx.lineTo(0.5, -47); ctx.lineTo(-7.5, -49); ctx.closePath();
+    ctx.fillStyle = P.pump; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = P.ink; ctx.stroke();
+    ctx.fillStyle = P.gunHi; ctx.fillRect(-7.5, -57.5, 1.4, 8);
+  }
+  // back arm
+  limb(ctx, -14, -32, -18, -12, 7, pal.base);
+  ell(ctx, -18.5, -9.5, 4.2, 3.6, pal.base, P.ink, 2);
+  // torso
+  ctx.beginPath();
+  ctx.moveTo(-17, -9);
+  ctx.quadraticCurveTo(-21, -30, -9, -39);
+  ctx.quadraticCurveTo(0, -42, 9, -39);
+  ctx.quadraticCurveTo(21, -30, 17, -9);
+  ctx.quadraticCurveTo(0, -5, -17, -9);
+  ctx.closePath();
+  ctx.fillStyle = pal.base; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = P.ink; ctx.stroke();
+  // shade tone right
+  ctx.beginPath();
+  ctx.moveTo(6, -39.6);
+  ctx.quadraticCurveTo(20.2, -30, 16.6, -9.4);
+  ctx.lineTo(9, -7.6);
+  ctx.quadraticCurveTo(12.5, -25, 6, -39.6);
+  ctx.closePath();
+  ctx.fillStyle = pal.shade; ctx.fill();
+  // strap
+  ctx.beginPath(); ctx.moveTo(-15, -22); ctx.lineTo(15, -19); ctx.lineTo(15, -15); ctx.lineTo(-15, -18); ctx.closePath();
+  ctx.fillStyle = pal.shade; ctx.fill(); ctx.lineWidth = 1.2; ctx.strokeStyle = P.ink; ctx.stroke();
+  // head, sunk into the shoulders
+  ell(ctx, 2, -43, 6.6, 6.2, pal.head, P.ink, 2);
+  ctx.fillStyle = P.ink;
+  ctx.fillRect(-2.6, -46.2, 9.6, 1.7);           // brow
+  ell(ctx, 0.2, -43.6, 1.15, 1.2, P.ink);        // eyes, close together
+  ell(ctx, 4.6, -43.6, 1.15, 1.2, P.ink);
+  ctx.fillRect(1, -40.2, 3.4, 1);                // mouth
+  if (crown) {
+    ctx.beginPath();
+    ctx.moveTo(-3.5, -47.5); ctx.lineTo(-3.5, -54); ctx.lineTo(-0.8, -50.5); ctx.lineTo(2, -55.5); ctx.lineTo(4.8, -50.5); ctx.lineTo(7.5, -54); ctx.lineTo(7.5, -47.5);
+    ctx.closePath();
+    ctx.fillStyle = P.gold; ctx.fill(); ctx.lineWidth = 1.6; ctx.strokeStyle = P.ink; ctx.lineJoin = 'miter'; ctx.stroke(); ctx.lineJoin = 'round';
+  }
+  // front arm + fist
+  limb(ctx, 14, -32, 20, -15, 7, pal.base);
+  ell(ctx, 20.5, -13, 4.2, 3.6, pal.base, P.ink, 2);
+  if (accessory === 'goblet') {
+    rrect(ctx, 17, -25, 7.5, 8, 1.5, P.gold, P.ink, 1.6);       // cup
+    ctx.fillStyle = P.ink; ctx.fillRect(20, -17, 1.6, 4);        // stem
+    ell(ctx, 20.8, -12.4, 3.4, 1.3, P.gold, P.ink, 1.2);         // foot
+    ctx.fillStyle = P.muzzle; ctx.fillRect(18.2, -24, 1.2, 5);   // highlight
+  }
+}
+const PAL_GRAVEDIGGER = { base: P.greyGreen, shade: P.greyGreenShade, head: P.greyGreen };
+const PAL_CLAUDIUS = { base: P.purple, shade: P.purpleShade, head: P.paleFace };
+function drawGravedigger(ctx, x, y, s, frame) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  drawBrute(ctx, frame, PAL_GRAVEDIGGER, 'shovel', false);
+  ctx.restore();
+}
+// Claudius: the Gravedigger at 3x, purple, crown, goblet. s=1 means the in-game (3x) size.
+function drawClaudius(ctx, x, y, s, frame) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s * 3, s * 3);
+  drawBrute(ctx, frame, PAL_CLAUDIUS, 'goblet', true);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- HUD + small things
+// Heart: pivot bottom-centre (the point). ~11 x 10 px.
+function drawHeart(ctx, x, y, s) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s); ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.bezierCurveTo(-6.2, -4.2, -6.4, -10.4, -2.8, -10.4);
+  ctx.quadraticCurveTo(-0.9, -10.4, 0, -8.2);
+  ctx.quadraticCurveTo(0.9, -10.4, 2.8, -10.4);
+  ctx.bezierCurveTo(6.4, -10.4, 6.2, -4.2, 0, 0);
+  ctx.closePath();
+  ctx.fillStyle = P.heart; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = P.ink; ctx.stroke();
+  ell(ctx, -2.7, -7.6, 1.3, 0.9, P.heartHi, null, 0, -0.5);
+  ctx.restore();
+}
+// Shell pip for the HUD tube: pivot bottom-centre, 5 x 10 px. empty=true draws a hollow spent pip.
+function drawShellPip(ctx, x, y, s, empty) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  if (empty) {
+    ctx.globalAlpha = 0.35;
+    rrect(ctx, -2.5, -10, 5, 10, 1.2, null, P.cream, 1.2);
+  } else {
+    rrect(ctx, -2.5, -10, 5, 7.6, 1.2, P.amber, P.ink, 1.2);
+    rrect(ctx, -2.5, -3, 5, 3, 0.6, P.brass, P.ink, 1.2);
+    ctx.fillStyle = P.muzzle; ctx.fillRect(-1.6, -9, 1, 5.6);
+  }
+  ctx.restore();
+}
+// Ejected casing: pivot CENTRE (it tumbles), 5.2 x 2.6 px, rot in radians.
+function drawCasing(ctx, x, y, s, rot) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s); ctx.rotate(rot || 0);
+  rrect(ctx, -2.6, -1.3, 5.2, 2.6, 0.8, P.brass, P.ink, 1);
+  ctx.fillStyle = P.brassDark; ctx.fillRect(-2.6, -1.3, 1.5, 2.6);
+  ctx.fillStyle = P.muzzle; ctx.fillRect(-0.8, -1, 2.6, 0.7);
+  ctx.restore();
+}
+// Gate in the border wall. (x, y) = centre of the opening on the wall's centre-line.
+// side: 'N'|'E'|'S'|'W' (which edge of the arena it sits on). glow 0..1 = amber telegraph.
+// 48 wide x 16 deep at s=1 (the border is 16 px).
+function drawGate(ctx, x, y, s, side, glow) {
+  const rot = { N: 0, E: Math.PI / 2, S: Math.PI, W: -Math.PI / 2 }[side] || 0;
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s); ctx.rotate(rot);   // local: wall along x, arena is +y
+  // glow (telegraph) — the game pre-renders this blob once; here it is a cheap gradient
+  if (glow > 0) {
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    const g = ctx.createRadialGradient(0, 8, 2, 0, 8, 46);
+    g.addColorStop(0, 'rgba(255,179,71,' + (0.55 * glow).toFixed(3) + ')');
+    g.addColorStop(1, 'rgba(255,179,71,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 8, 46, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+  // wall slab around the opening
+  ctx.fillStyle = P.border; ctx.fillRect(-30, -8, 60, 16);
+  // the opening: a dark tunnel
+  rrect(ctx, -14, -8.5, 28, 17, 0.8, P.gateDark, P.ink, 2);
+  // tunnel floor tint when telegraphing
+  if (glow > 0) { ctx.fillStyle = 'rgba(255,179,71,' + (0.45 * glow).toFixed(3) + ')'; ctx.fillRect(-12, 1, 24, 6); }
+  // steps
+  ctx.fillStyle = P.borderHi; ctx.fillRect(-12, -3, 24, 1.2); ctx.fillRect(-12, 2, 24, 1.2);
+  // posts
+  rrect(ctx, -19, -9.5, 5, 19, 1, P.borderHi, P.ink, 2);
+  rrect(ctx, 14, -9.5, 5, 19, 1, P.borderHi, P.ink, 2);
+  // torches on the arena side of the posts
+  const t = 0.6 + 0.4 * (glow || 0);
+  ell(ctx, -16.5, 8.5, 2.2, 2.2, P.amber, P.ink, 1);
+  ell(ctx, 16.5, 8.5, 2.2, 2.2, P.amber, P.ink, 1);
+  ctx.globalAlpha = t; ell(ctx, -16.5, 8.5, 1, 1, P.muzzle); ell(ctx, 16.5, 8.5, 1, 1, P.muzzle); ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- composition helper (liftable)
+// Draw order rule: gun OVER the body when aiming down (sin(angle) >= 0), UNDER when aiming up.
+// Body flips when cos(angle) < 0. Hand pivot = feet + (NUN_HAND.x * s * facing, NUN_HAND.y * s).
+function drawNunWithGun(ctx, x, y, s, angle, pumpOffset, o) {
+  o = Object.assign({}, o || {});
+  const facing = Math.cos(angle) < 0 ? -1 : 1;
+  o.facing = facing;
+  const hx = x + NUN_HAND.x * s * facing, hy = y + NUN_HAND.y * s;
+  if (Math.sin(angle) >= 0) { drawNun(ctx, x, y, s, o); drawGun(ctx, hx, hy, s, angle, pumpOffset); }
+  else { drawGun(ctx, hx, hy, s, angle, pumpOffset); drawNun(ctx, x, y, s, o); }
+}
+
+
+// ============================================================================
+// ==== UI  (liftable) — fonts, text, tweens, panels, reticle, screens
+// Every screen function takes (ctx, t, data) with plain data, never game state.
+// Canvas is the logical 960x540; W/H below.
+// ============================================================================
+const W = 960, H = 540;
+const FONT_SERIF = (px, italic) => (italic ? 'italic ' : '') + 'bold ' + px + 'px Georgia, "Times New Roman", serif';
+const FONT_SANS = (px, regular) => (regular ? '' : 'bold ') + px + 'px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif';
+const rgba = (hex, a) => { const n = parseInt(hex.slice(1), 16); return 'rgba(' + (n >> 16 & 255) + ',' + (n >> 8 & 255) + ',' + (n & 255) + ',' + a + ')'; };
+const fmt = (n) => Math.round(n).toLocaleString('en-US');
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+const easeOutBack = (x) => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+const easeOutCubic = (x) => 1 - Math.pow(1 - x, 3);
+const pulse = (t, hz, lo, hi) => lo + (hi - lo) * (0.5 + 0.5 * Math.sin(t * hz * TAU));
+
+// measure with letter spacing
+function measure(ctx, str, font, spacing) {
+  ctx.font = font; return ctx.measureText(str).width + (spacing || 0) * Math.max(0, str.length - 1);
+}
+// text(): align 'left'|'center'|'right'; opts { spacing, shadow (px offset, ink), stroke (px, ink), baseline }
+function text(ctx, str, x, y, font, color, align, opts) {
+  opts = opts || {};
+  const sp = opts.spacing || 0;
+  const w = measure(ctx, str, font, sp);
+  const sx = align === 'center' ? x - w / 2 : align === 'right' ? x - w : x;
+  ctx.font = font; ctx.textAlign = 'left'; ctx.textBaseline = opts.baseline || 'alphabetic';
+  const run = (dx, dy, mode, c) => {
+    if (mode === 'fill') ctx.fillStyle = c; else { ctx.strokeStyle = c; ctx.lineWidth = opts.stroke; ctx.lineJoin = 'round'; }
+    let cx = sx + dx;
+    if (!sp) { mode === 'fill' ? ctx.fillText(str, cx, y + dy) : ctx.strokeText(str, cx, y + dy); return; }
+    for (const ch of str) { mode === 'fill' ? ctx.fillText(ch, cx, y + dy) : ctx.strokeText(ch, cx, y + dy); cx += ctx.measureText(ch).width + sp; }
+  };
+  if (opts.shadow) run(opts.shadow, opts.shadow, 'fill', opts.shadowColor || P.ink);
+  if (opts.stroke) run(0, 0, 'stroke', opts.strokeColor || P.ink);
+  run(0, 0, 'fill', color);
+  return w;
+}
+function wrap(ctx, str, font, maxW) {
+  ctx.font = font; const out = []; let cur = '';
+  for (const wd of str.split(' ')) { const tr = cur ? cur + ' ' + wd : wd; if (ctx.measureText(tr).width > maxW && cur) { out.push(cur); cur = wd; } else cur = tr; }
+  if (cur) out.push(cur); return out;
+}
+
+// ---- panels, caps, dims, cached vignette + glow blob --------------------------
+function pill(ctx, x, y, w, h, a) { rrect(ctx, x, y, w, h, Math.min(h / 2, 10), 'rgba(7,7,13,' + (a == null ? 0.55 : a) + ')'); }
+function keycap(ctx, x, y, ch, size) {
+  size = size || 22;
+  rrect(ctx, x, y + 2, size, size, 4, 'rgba(0,0,0,0.5)');                       // drop
+  rrect(ctx, x, y, size, size, 4, '#22233a', rgba(P.cream, 0.55), 1.5);
+  text(ctx, ch, x + size / 2, y + size * 0.72, FONT_SANS(Math.round(size * 0.55)), P.cream, 'center');
+}
+function dim(ctx, a) { ctx.fillStyle = 'rgba(7,7,13,' + a + ')'; ctx.fillRect(0, 0, W, H); }
+function rule(ctx, x, y, w, color) { ctx.fillStyle = color || P.amber; ctx.fillRect(x, y, w, 2); }
+
+let VIGNETTE = null, GLOW = null;   // built once, blitted forever
+function vignette(ctx, strength) {
+  if (!VIGNETTE) {
+    VIGNETTE = document.createElement('canvas'); VIGNETTE.width = W; VIGNETTE.height = H;
+    const o = VIGNETTE.getContext('2d');
+    const g = o.createRadialGradient(W / 2, H / 2, H * 0.32, W / 2, H / 2, H * 0.9);
+    g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,0.75)');
+    o.fillStyle = g; o.fillRect(0, 0, W, H);
+  }
+  ctx.save(); ctx.globalAlpha = strength == null ? 1 : strength; ctx.drawImage(VIGNETTE, 0, 0); ctx.restore();
+}
+// gate telegraph / torch glow: one pre-rendered amber blob, blitted with alpha (replaces the gradient inside drawGate in-game)
+function glowBlob(ctx, x, y, r, a) {
+  if (!GLOW) {
+    GLOW = document.createElement('canvas'); GLOW.width = GLOW.height = 128;
+    const o = GLOW.getContext('2d');
+    const g = o.createRadialGradient(64, 64, 2, 64, 64, 64);
+    g.addColorStop(0, 'rgba(255,179,71,0.9)'); g.addColorStop(0.5, 'rgba(255,179,71,0.25)'); g.addColorStop(1, 'rgba(255,179,71,0)');
+    o.fillStyle = g; o.fillRect(0, 0, 128, 128);
+  }
+  ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = a; ctx.drawImage(GLOW, x - r, y - r, r * 2, r * 2); ctx.restore();
+}
+
+// ---- arena base + a sample scene (page-only helpers, but the base is how the game draws its floor) ----
+function drawArenaBase(ctx, t, torch) {
+  ctx.fillStyle = P.floor; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = P.floorLine; ctx.lineWidth = 2; ctx.beginPath();
+  for (let x = 16; x <= W - 16; x += 32) { ctx.moveTo(x + 0.5, 16); ctx.lineTo(x + 0.5, H - 16); }
+  for (let y = 16; y <= H - 16; y += 32) { ctx.moveTo(16, y + 0.5); ctx.lineTo(W - 16, y + 0.5); }
+  ctx.stroke();
+  ctx.fillStyle = P.border; ctx.fillRect(0, 0, W, 16); ctx.fillRect(0, H - 16, W, 16); ctx.fillRect(0, 0, 16, H); ctx.fillRect(W - 16, 0, 16, H);
+  ctx.strokeStyle = P.ink; ctx.lineWidth = 2; ctx.strokeRect(16, 16, W - 32, H - 32);
+  const gates = [[W / 2, 8, 'N', W / 2, 26], [W - 8, H / 2, 'E', W - 26, H / 2], [W / 2, H - 8, 'S', W / 2, H - 26], [8, H / 2, 'W', 26, H / 2]];
+  gates.forEach(([gx, gy, sd, bx, by], i) => {
+    const fl = 0.5 + 0.5 * Math.sin(t * 9 + i * 1.7) * Math.sin(t * 13.1 + i);
+    if (torch) glowBlob(ctx, bx, by, 70, torch * (0.35 + 0.25 * fl));
+    drawGate(ctx, gx, gy, 1, sd, 0);
+  });
+}
+function makeRng(seed) { let s = seed; return () => (s = (s * 16807) % 2147483647) / 2147483647; }
+// kind: 'fight' (mid-shot, clump right), 'boss' (Claudius), 'quiet' (few enemies)
+function drawSampleScene(ctx, t, kind) {
+  drawArenaBase(ctx, t, 0.5);
+  const rnd = makeRng(kind === 'boss' ? 99 : kind === 'quiet' ? 5 : 42);
+  // decals + casings
+  ctx.globalAlpha = 0.5;
+  for (let i = 0; i < 5; i++) { const r = 8 + rnd() * 8; ell(ctx, 120 + rnd() * 700, 80 + rnd() * 380, r, r * 0.55, P.greenShade); }
+  ctx.globalAlpha = 1;
+  for (let i = 0; i < 7; i++) drawCasing(ctx, 380 + rnd() * 90, 300 + rnd() * 60, 1, rnd() * TAU);
+  const bodies = [];
+  const nun = { x: 440, y: 312, angle: kind === 'boss' ? -0.35 : 0.12 };
+  if (kind === 'fight') {
+    for (let i = 0; i < 12; i++) bodies.push({ x: 640 + rnd() * 120, y: 230 + rnd() * 150, f: (c, x, y) => drawRestless(c, x, y, 1, i % 2) });
+    for (let i = 0; i < 7; i++) bodies.push({ x: 720 + rnd() * 150, y: 400 + rnd() * 90, f: (c, x, y) => drawYorick(c, x, y, 1, i % 2) });
+    bodies.push({ x: 150, y: 170, f: (c, x, y) => drawGravedigger(c, x, y, 1, 0) });
+    for (let i = 0; i < 3; i++) bodies.push({ x: 60 + rnd() * 60, y: 380 + rnd() * 100, f: (c, x, y) => drawRestless(c, x, y, 1, i % 2) });
+  } else if (kind === 'boss') {
+    bodies.push({ x: 720, y: 420, f: (c, x, y) => drawClaudius(c, x, y, 1, 0) });
+    for (let i = 0; i < 9; i++) bodies.push({ x: 560 + rnd() * 320, y: 120 + rnd() * 130, f: (c, x, y) => drawYorick(c, x, y, 1, i % 2) });
+    for (let i = 0; i < 4; i++) bodies.push({ x: 120 + rnd() * 200, y: 380 + rnd() * 100, f: (c, x, y) => drawYorick(c, x, y, 1, i % 2) });
+  } else {
+    for (let i = 0; i < 5; i++) bodies.push({ x: 600 + rnd() * 250, y: 200 + rnd() * 200, f: (c, x, y) => drawRestless(c, x, y, 1, i % 2) });
+    for (let i = 0; i < 4; i++) bodies.push({ x: 120 + rnd() * 200, y: 380 + rnd() * 100, f: (c, x, y) => drawYorick(c, x, y, 1, i % 2) });
+  }
+  bodies.push({ x: nun.x, y: nun.y, f: (c, x, y) => drawNunWithGun(c, x, y, 1, nun.angle, kind === 'fight' ? 0.6 : 0) });
+  bodies.sort((p, q) => p.y - q.y).forEach((b) => b.f(ctx, b.x, b.y));
+  if (kind === 'fight') {
+    // pellets in a 22° cone + muzzle flash, mid-shot
+    const hx = nun.x + NUN_HAND.x, hy = nun.y + NUN_HAND.y;
+    const mx = hx + Math.cos(nun.angle) * GUN_MUZZLE, my = hy + Math.sin(nun.angle) * GUN_MUZZLE;
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    glowBlob(ctx, mx, my, 34, 0.7);
+    ctx.fillStyle = P.muzzle;
+    for (let i = 0; i < 8; i++) {
+      const a = nun.angle + (-11 + (i + 0.5) * 2.75 + (rnd() - 0.5) * 2) * Math.PI / 180, d = 60 + rnd() * 90;
+      ctx.save(); ctx.translate(mx + Math.cos(a) * d, my + Math.sin(a) * d); ctx.rotate(a); ctx.globalAlpha = 0.95 - d / 300; ctx.fillRect(-4, -1.2, 9, 2.4); ctx.restore();
+    }
+    ctx.restore();
+  }
+  return nun;
+}
+
+// ---- reticle ------------------------------------------------------------------
+// radius encodes the spread at the cursor distance; solid amber when a target is inside kill range, hollow dashed cream beyond
+function drawReticle(ctx, x, y, dist, inRange) {
+  const r = Math.max(6, Math.min(60, dist * Math.tan(11 * Math.PI / 180)));
+  ctx.save(); ctx.translate(x, y); ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(7,7,13,0.55)'; ctx.lineWidth = inRange ? 4.5 : 3.5; ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.stroke();
+  if (inRange) {
+    ctx.strokeStyle = P.amber; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.stroke();
+    ctx.beginPath();
+    for (let i = 0; i < 4; i++) { const a = i * Math.PI / 2; ctx.moveTo(Math.cos(a) * (r - 7), Math.sin(a) * (r - 7)); ctx.lineTo(Math.cos(a) * (r + 5), Math.sin(a) * (r + 5)); }
+    ctx.stroke();
+    ctx.fillStyle = P.amber; ctx.beginPath(); ctx.arc(0, 0, 2.4, 0, TAU); ctx.fill();
+  } else {
+    ctx.strokeStyle = rgba(P.cream, 0.7); ctx.lineWidth = 1.5; ctx.setLineDash([7, 6]); ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = rgba(P.cream, 0.7); ctx.beginPath(); ctx.arc(0, 0, 1.8, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ============================================================================
+// ==== SCREENS
+// ============================================================================
+
+// 1. TITLE  data = { best, bestWave, hardHabitUnlocked, hardHabitOn, muted }
+function drawTitle(ctx, t, data) {
+  drawArenaBase(ctx, t, 1);
+  dim(ctx, 0.42);
+  vignette(ctx, 1);
+  // menace at the gates
+  ctx.save(); ctx.globalAlpha = 0.6;
+  drawYorick(ctx, 470, 512, 2.2, 0); drawYorick(ctx, 512, 500, 2.2, 1); drawYorick(ctx, 545, 516, 2.2, 0);
+  ctx.save(); ctx.translate(880, 175); ctx.scale(-1, 1); drawRestless(ctx, 0, 0, 2.4, 0); ctx.restore();
+  ctx.save(); ctx.translate(815, 128); ctx.scale(-1, 1); drawRestless(ctx, 0, 0, 2.4, 1); ctx.restore();
+  drawRestless(ctx, 905, 300, 2.4, 0);
+  drawYorick(ctx, 60, 470, 2.2, 1); drawYorick(ctx, 96, 456, 2.2, 0);
+  ctx.restore();
+  // hero
+  drawNunWithGun(ctx, 745, 476, 4.6, Math.PI - 0.55, 0.2);
+  // poster text
+  text(ctx, 'GET THEE TO', 72, 150, FONT_SERIF(56), P.cream, 'left', { shadow: 3, spacing: 1 });
+  text(ctx, 'A NUNNERY', 68, 244, FONT_SERIF(98), P.cream, 'left', { shadow: 4 });
+  rule(ctx, 72, 262, 380);
+  text(ctx, 'She took the advice.', 74, 302, FONT_SERIF(28, true), P.amber, 'left', { shadow: 2 });
+  text(ctx, 'WASD MOVE   ·   MOUSE AIM   ·   CLICK TO BEGIN', 74, 350, FONT_SANS(13), rgba(P.cream, pulse(t, 0.7, 0.5, 1)), 'left', { spacing: 2, shadow: 1 });
+  if (data.hardHabitUnlocked) {
+    const on = !!data.hardHabitOn;
+    pill(ctx, 66, 388, 214, 34, 0.45);
+    keycap(ctx, 74, 394, 'H');
+    text(ctx, 'HARD HABIT', 106, 411, FONT_SANS(13), P.cream, 'left', { spacing: 2 });
+    text(ctx, on ? 'ON' : 'OFF', 268, 411, FONT_SANS(13), on ? P.amber : rgba(P.cream, 0.45), 'right', { spacing: 2 });
+  }
+  text(ctx, 'BEST ' + fmt(data.best) + '   ·   WAVE ' + data.bestWave, 72, 504, FONT_SANS(14), rgba(P.cream, 0.85), 'left', { spacing: 1.5, shadow: 1 });
+  const mlab = data.muted ? 'MUTED' : 'MUTE';
+  const mw = measure(ctx, mlab, FONT_SANS(12), 2);
+  keycap(ctx, W - 72 - mw - 30, 486, 'M', 20);
+  text(ctx, mlab, W - 72, 502, FONT_SANS(12), data.muted ? P.amber : rgba(P.cream, 0.7), 'right', { spacing: 2 });
+}
+
+// 2. HUD  data = { hp, maxHp, shells, maxShells, gunState, score, mult, chain, waveName, bossHp, t, popT }
+//    popT = seconds since the multiplier last changed (drives the pop-scale); t = time (drives the loading pulse)
+function drawHeartEmpty(ctx, x, y, s) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s); ctx.lineJoin = 'round';
+  ctx.beginPath(); ctx.moveTo(0, 0);
+  ctx.bezierCurveTo(-6.2, -4.2, -6.4, -10.4, -2.8, -10.4); ctx.quadraticCurveTo(-0.9, -10.4, 0, -8.2);
+  ctx.quadraticCurveTo(0.9, -10.4, 2.8, -10.4); ctx.bezierCurveTo(6.4, -10.4, 6.2, -4.2, 0, 0); ctx.closePath();
+  ctx.fillStyle = 'rgba(7,7,13,0.55)'; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = rgba(P.cream, 0.35); ctx.stroke();
+  ctx.restore();
+}
+function drawHUD(ctx, data) {
+  const t = data.t || 0;
+  // hearts, top-left
+  const hs = 1.7, hstep = 27, hx0 = 36;
+  pill(ctx, 14, 8, data.maxHp * hstep + 18, 32);
+  for (let i = 0; i < data.maxHp; i++) (i < data.hp ? drawHeart : drawHeartEmpty)(ctx, hx0 + i * hstep, 34, hs);
+  // wave name, top-centre (+ boss bar)
+  const wf = FONT_SANS(12), ww = measure(ctx, data.waveName, wf, 3);
+  const hasBoss = data.bossHp != null;
+  pill(ctx, W / 2 - Math.max(ww, 300) / 2 - 16, 8, Math.max(ww, 300) + 32, hasBoss ? 34 : 24);
+  text(ctx, data.waveName, W / 2, 25, wf, rgba(P.cream, 0.9), 'center', { spacing: 3 });
+  if (hasBoss) {
+    rrect(ctx, W / 2 - 150, 30, 300, 7, 3.5, P.ink, rgba(P.cream, 0.45), 1);
+    if (data.bossHp > 0) rrect(ctx, W / 2 - 149, 31, 298 * clamp01(data.bossHp), 5, 2.5, P.purple);
+    ctx.fillStyle = P.gold; ctx.fillRect(W / 2 - 150 + 298 * clamp01(data.bossHp) - 1, 29, 2, 9);   // gold tip
+  }
+  // score + multiplier + chain, top-right
+  const sf = FONT_SANS(26), mf = FONT_SANS(17), cf = FONT_SANS(10);
+  const sc = fmt(data.score), sw = measure(ctx, sc, sf, 0);
+  const ms = 'x' + data.mult.toFixed(1), mw = measure(ctx, ms, mf, 0);
+  const cs = data.chain > 1 ? 'CHAIN ' + data.chain : '', cw = cs ? measure(ctx, cs, cf, 2) : 0;
+  const totalW = sw + 14 + mw + (cs ? cw + 14 : 0);
+  pill(ctx, W - 30 - totalW - 16, 8, totalW + 32, 32);
+  text(ctx, sc, W - 30, 34, sf, P.cream, 'right', { shadow: 1 });
+  const pop = 1 + 0.35 * (1 - clamp01((data.popT == null ? 9 : data.popT) / 0.25));
+  ctx.save(); ctx.translate(W - 30 - sw - 14 - mw / 2, 27); ctx.scale(pop, pop);
+  text(ctx, ms, 0, 6, mf, P.amber, 'center', { shadow: 1 }); ctx.restore();
+  if (cs) text(ctx, cs, W - 30 - sw - 14 - mw - 14, 30, cf, rgba(P.cream, 0.6), 'right', { spacing: 2 });
+  // shells + gun state, bottom-left
+  const ps = 1.6, pstep = 14, px0 = 32;
+  const stf = FONT_SANS(10), stw = measure(ctx, data.gunState, stf, 2.5);
+  pill(ctx, 14, H - 40, data.maxShells * pstep + stw + 40, 32);
+  for (let i = 0; i < data.maxShells; i++) {
+    const x = px0 + i * pstep;
+    if (i < data.shells) drawShellPip(ctx, x, H - 13, ps);
+    else {
+      drawShellPip(ctx, x, H - 13, ps, true);
+      if (data.gunState === 'LOADING' && i === data.shells) { ctx.save(); ctx.globalAlpha = pulse(t, 2.5, 0.15, 0.75); drawShellPip(ctx, x, H - 13, ps); ctx.restore(); }
+    }
+  }
+  const stc = data.gunState === 'READY' ? rgba(P.cream, 0.85) : data.gunState === 'PUMPING' ? P.amber : rgba(P.amber, pulse(t, 2.5, 0.5, 1));
+  text(ctx, data.gunState, px0 + data.maxShells * pstep + 6, H - 20, stf, stc, 'left', { spacing: 2.5 });
+}
+
+// 3. WAVE CARD  drawWaveCard(ctx, t, name, sub)  — slam-in 0→0.3 s (1.6→1.0 with overshoot), hold, fade 1.0→2.0 s
+function waveCardTween(t) {
+  const scale = t < 0.3 ? 1.6 - 0.6 * easeOutBack(clamp01(t / 0.3)) : 1;
+  const alpha = t < 1 ? clamp01(t / 0.06) : clamp01(1 - (t - 1));
+  return { scale, alpha };
+}
+function drawWaveCard(ctx, t, name, sub) {
+  const { scale, alpha } = waveCardTween(t);
+  if (alpha <= 0) return;
+  ctx.save(); ctx.globalAlpha = alpha; ctx.translate(W / 2, H * 0.42); ctx.scale(scale, scale);
+  const w = 640, h = sub ? 124 : 96;
+  rrect(ctx, -w / 2, -h / 2, w, h, 6, 'rgba(7,7,13,0.6)');
+  rule(ctx, -w / 2 + 36, -h / 2 - 1, w - 72); rule(ctx, -w / 2 + 36, h / 2 - 1, w - 72);
+  text(ctx, name, 0, sub ? -6 : 18, FONT_SERIF(52), P.cream, 'center', { shadow: 3, spacing: 2 });
+  if (sub) text(ctx, sub, 0, 40, FONT_SERIF(22, true), P.amber, 'center', { shadow: 2, spacing: 5 });
+  ctx.restore();
+}
+
+// 4. CARDS  cards = [{ name, line, color, stacks, max }], hoverIndex, t
+function drawCards(ctx, cards, hoverIndex, t) {
+  dim(ctx, 0.62); vignette(ctx, 0.7);
+  text(ctx, 'CHOOSE A BLESSING', W / 2, 74, FONT_SANS(22), P.cream, 'center', { spacing: 6, shadow: 2 });
+  rule(ctx, W / 2 - 44, 88, 88);
+  const cw = 224, ch = 286, gap = 36, x0 = W / 2 - (3 * cw + 2 * gap) / 2, y0 = 118;
+  cards.forEach((c, i) => {
+    const hov = i === hoverIndex, x = x0 + i * (cw + gap), y = y0 + (hov ? -10 : 0);
+    rrect(ctx, x + 5, y + 9, cw, ch, 12, 'rgba(0,0,0,0.5)');
+    rrect(ctx, x, y, cw, ch, 12, hov ? '#1d1e33' : '#12131f', c.color, hov ? 4 : 3);
+    if (hov) rrect(ctx, x - 5, y - 5, cw + 10, ch + 10, 16, null, rgba(c.color, 0.35 + 0.15 * Math.sin(t * 5)), 3);
+    // seal
+    const sx = x + cw / 2, sy = y + 66;
+    ell(ctx, sx, sy + 3, 31, 31, 'rgba(0,0,0,0.45)');
+    ell(ctx, sx, sy, 31, 31, hov ? c.color : rgba(c.color, 0.85), P.ink, 2);
+    ctx.fillStyle = 'rgba(7,7,13,0.8)'; ctx.fillRect(sx - 4.5, sy - 22, 9, 42); ctx.fillRect(sx - 14, sy - 11, 28, 8);
+    // name (wrap to 2 lines)
+    const nf = FONT_SANS(19), nl = wrap(ctx, c.name, nf, cw - 34);
+    nl.forEach((ln, k) => text(ctx, ln, sx, y + 135 + k * 24 - (nl.length - 1) * 6, nf, P.cream, 'center', { spacing: 1.5 }));
+    // one line, sentence case, regular weight
+    const lf = FONT_SANS(15, true), ll = wrap(ctx, c.line, lf, cw - 44);
+    ll.forEach((ln, k) => text(ctx, ln, sx, y + 196 + k * 21, lf, rgba(P.cream, 0.85), 'center'));
+    // stack pips
+    if (c.max > 1) for (let k = 0; k < c.max; k++) ell(ctx, sx + (k - (c.max - 1) / 2) * 18, y + 250, 5.5, 5.5, k < c.stacks ? c.color : 'rgba(7,7,13,0.6)', rgba(P.cream, 0.5), 1.5);
+    keycap(ctx, sx - 11, y0 + ch + 16, String(i + 1));
+  });
+}
+
+// 5. GAME OVER  data = { score, best, isNewBest, quote, newUnlock }
+function drawGameOver(ctx, t, data) {
+  dim(ctx, 0.72); vignette(ctx, 0.8);
+  const qf = FONT_SERIF(30, true), ql = wrap(ctx, '“' + data.quote + '”', qf, 760);
+  ql.forEach((ln, k) => text(ctx, ln, W / 2, 152 + k * 38, qf, P.cream, 'center', { shadow: 2 }));
+  const qy = 152 + (ql.length - 1) * 38;
+  rule(ctx, W / 2 - 44, qy + 24, 88);
+  text(ctx, 'SCORE', W / 2, qy + 66, FONT_SANS(13), rgba(P.cream, 0.6), 'center', { spacing: 5 });
+  text(ctx, fmt(data.score), W / 2, qy + 126, FONT_SANS(58), P.cream, 'center', { shadow: 3 });
+  text(ctx, 'BEST ' + fmt(data.best), W / 2, qy + 158, FONT_SANS(14), rgba(P.cream, 0.7), 'center', { spacing: 3 });
+  if (data.isNewBest) {
+    const sw = measure(ctx, fmt(data.score), FONT_SANS(58), 0);
+    ctx.save(); ctx.translate(W / 2 + sw / 2 + 84, qy + 100); ctx.rotate(-0.14);
+    const k = 1 + 0.05 * Math.sin(t * 7); ctx.scale(k, k);
+    ctx.strokeStyle = P.amber; ctx.lineWidth = 2.5; ctx.lineCap = 'round'; ctx.beginPath();
+    for (let i = 0; i < 8; i++) { const a = i * TAU / 8 + 0.2; ctx.moveTo(Math.cos(a) * 66, Math.sin(a) * 30); ctx.lineTo(Math.cos(a) * 80, Math.sin(a) * 40); }
+    ctx.stroke();
+    rrect(ctx, -60, -18, 120, 36, 6, P.amber, P.ink, 2);
+    text(ctx, 'NEW BEST', 0, 7, FONT_SANS(16), P.ink, 'center', { spacing: 3 });
+    ctx.restore();
+  }
+  if (data.newUnlock) {
+    const s = 'NEW BLESSING:  ' + data.newUnlock, f = FONT_SANS(15), w = measure(ctx, s, f, 3);
+    pill(ctx, W / 2 - w / 2 - 22, qy + 186, w + 44, 34, 0.5);
+    ell(ctx, W / 2 - w / 2 - 8, qy + 203, 4, 4, P.amber);
+    text(ctx, s, W / 2 + 6, qy + 208, f, P.amber, 'center', { spacing: 3 });
+  }
+  text(ctx, 'CLICK TO RETRY', W / 2, 482, FONT_SANS(13), rgba(P.cream, pulse(t, 0.7, 0.45, 1)), 'center', { spacing: 4 });
+}
+
+// 6. WIN  data = { score, best }
+function drawCrown(ctx, x, y, s, rot) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s); ctx.rotate(rot || 0); ctx.lineJoin = 'miter';
+  ctx.beginPath(); ctx.moveTo(-5.5, 0); ctx.lineTo(-5.5, -6.5); ctx.lineTo(-2.8, -3); ctx.lineTo(0, -8); ctx.lineTo(2.8, -3); ctx.lineTo(5.5, -6.5); ctx.lineTo(5.5, 0); ctx.closePath();
+  ctx.fillStyle = P.gold; ctx.fill(); ctx.lineWidth = 1.6; ctx.strokeStyle = P.ink; ctx.stroke();
+  ctx.restore();
+}
+function drawWin(ctx, t, data) {
+  dim(ctx, 0.6); vignette(ctx, 0.7);
+  // confetti: static scatter (in-game these are the particle system's bone/gold rects)
+  const rnd = makeRng(1234);
+  for (let i = 0; i < 110; i++) {
+    const x = 30 + rnd() * (W - 60), y = 30 + rnd() * (H - 60);
+    if (y > 148 && y < 324 && x > 98 && x < 862) continue;   // keep the text band clean
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rnd() * TAU); ctx.globalAlpha = 0.6 + rnd() * 0.4;
+    ctx.fillStyle = [P.bone, P.gold, P.amber, P.muzzle][i % 4]; ctx.fillRect(-2, -5, 4, 10); ctx.restore();
+  }
+  // the nun, and the crown on the floor
+  shadow(ctx, 700, 486, 14, 4);
+  drawCrown(ctx, 700, 484, 3.2, 0.35);
+  drawNunWithGun(ctx, 760, 488, 3, Math.PI - 1.05, 0);
+  rrect(ctx, W / 2 - 370, 160, 740, 152, 8, 'rgba(7,7,13,0.55)');
+  text(ctx, 'THE REST IS SILENCE.', W / 2, 226, FONT_SERIF(56), P.cream, 'center', { shadow: 3, spacing: 1 });
+  rule(ctx, W / 2 - 44, 244, 88);
+  text(ctx, 'ENCORE?  CLICK   ·   ESC TO BOW', W / 2, 286, FONT_SANS(14), rgba(P.cream, pulse(t, 0.7, 0.5, 1)), 'center', { spacing: 3 });
+  text(ctx, 'SCORE ' + fmt(data.score), W / 2, 372, FONT_SANS(28), P.cream, 'center', { spacing: 2, shadow: 2 });
+  if (data.best != null) text(ctx, 'BEST ' + fmt(data.best), W / 2, 400, FONT_SANS(14), rgba(P.cream, 0.7), 'center', { spacing: 3 });
+}
+
+// 7. PAUSE + CALLOUT
+function drawPause(ctx) {
+  dim(ctx, 0.6); vignette(ctx, 0.5);
+  text(ctx, 'PAUSED', W / 2, H / 2 - 4, FONT_SANS(40), P.cream, 'center', { spacing: 12, shadow: 3 });
+  rule(ctx, W / 2 - 44, H / 2 + 14, 88);
+  text(ctx, 'ESC OR P TO RESUME', W / 2, H / 2 + 48, FONT_SANS(13), rgba(P.cream, 0.75), 'center', { spacing: 4 });
+}
+// callout: pop 0→0.22 s with overshoot, rises 44 px over 1 s, fades 0.55→1.0 s
+function drawCallout(ctx, x, y, str, t) {
+  const sc = 0.5 + 0.5 * easeOutBack(clamp01(t / 0.22));
+  const rise = 44 * easeOutCubic(clamp01(t));
+  const a = t < 0.55 ? 1 : clamp01(1 - (t - 0.55) / 0.45);
+  if (a <= 0) return;
+  ctx.save(); ctx.globalAlpha = a; ctx.translate(x, y - rise); ctx.scale(sc, sc); ctx.rotate(-0.06);
+  text(ctx, str, 0, 0, FONT_SERIF(30, true), P.amber, 'center', { stroke: 6, spacing: 1 });
+  ctx.restore();
+}
+
+// ============================================================================
+// ==== SCRATCH PAGE — one canvas per screen (not for lifting)
+// ============================================================================
+const CARDS = [
+  { name: 'HOLY BUCKSHOT', line: 'Three more pellets. Denser sermon.', color: P.amber, stacks: 1, max: 3 },
+  { name: 'SAWN-OFF SERMON', line: 'Wider, harder, shorter. Get closer.', color: P.ghost, stacks: 0, max: 1 },
+  { name: 'GRACE', line: 'One more heart. Fully healed.', color: P.heart, stacks: 0, max: 1 },
+];
+const screens = [
+  ['1. TITLE — drawTitle(ctx, t, { best: 12340, bestWave: 7, hardHabitUnlocked: true, hardHabitOn: false, muted: false })',
+    (c, t) => drawTitle(c, t, { best: 12340, bestWave: 7, hardHabitUnlocked: true, hardHabitOn: false, muted: false })],
+  ['2a. HUD over a mid-shot frame — hp 2/3, shells 1/4 LOADING (pulsing pip), score 8,120, x2.4 popping, CHAIN 14, ACT III · SCENE I. Reticle at the cursor: IN RANGE (solid amber).',
+    (c, t) => { drawSampleScene(c, t, 'fight'); drawReticle(c, 662, 300, Math.hypot(662 - 440, 300 - 312), true); drawHUD(c, { hp: 2, maxHp: 3, shells: 1, maxShells: 4, gunState: 'LOADING', score: 8120, mult: 2.4, chain: 14, waveName: 'ACT III · SCENE I', bossHp: null, t: 0.1, popT: 0.05 }); }],
+  ['2b. HUD, boss wave — hp 4/5 (Grace), shells 4/6 (Hail Mary) READY, x1.0, ACT V · SCENE II with Claudius bar at 62%. Reticle far from the nun: BEYOND RANGE (hollow, dashed, wide).',
+    (c, t) => { drawSampleScene(c, t, 'boss'); drawReticle(c, 760, 150, Math.hypot(760 - 440, 150 - 312), false); drawHUD(c, { hp: 4, maxHp: 5, shells: 4, maxShells: 6, gunState: 'READY', score: 31480, mult: 1.0, chain: 0, waveName: 'ACT V · SCENE II', bossHp: 0.62, t: 0.4, popT: 9 }); }],
+  ['3a. WAVE CARD at t = 0.3 (settled after the slam) with the optional sub — the real look',
+    (c, t) => { drawSampleScene(c, t, 'quiet'); drawWaveCard(c, 0.3, 'ACT V · SCENE II', 'CURTAIN CALL'); }],
+  ['3b. WAVE CARD tween frames, t = 0.05 / 0.3 / 1.0 (each shown at 1/3 scale)',
+    (c, t) => { drawSampleScene(c, t, 'quiet'); dim(c, 0.3); [0.05, 0.3, 1.0].forEach((tt, i) => { c.save(); c.translate(i * 320, 0); c.scale(1 / 3, 1); c.translate(0, 0); c.scale(1, 1 / 3); c.translate(0, 270); c.strokeStyle = 'rgba(244,240,230,0.2)'; c.lineWidth = 3; c.strokeRect(2, 2, W - 4, H - 4); drawWaveCard(c, tt, 'ACT III · SCENE I'); c.restore(); }); }],
+  ['4. CARDS — drawCards(ctx, CARDS, 1, t) over the dimmed frozen arena; card 2 hovered',
+    (c, t) => { drawSampleScene(c, t, 'quiet'); drawCards(c, CARDS, 1, t); }],
+  ['5a. GAME OVER — quote + NEW BLESSING: WRATH',
+    (c, t) => { drawSampleScene(c, t, 'fight'); drawGameOver(c, t, { score: 8120, best: 12340, isNewBest: false, quote: 'Something is rotten in Denmark. Mostly you.', newUnlock: 'WRATH' }); }],
+  ['5b. GAME OVER — NEW BEST flourish, no unlock',
+    (c, t) => { drawSampleScene(c, t, 'fight'); drawGameOver(c, t, { score: 13050, best: 13050, isNewBest: true, quote: 'Goodnight, sweet nun.', newUnlock: null }); }],
+  ['6. WIN — drawWin(ctx, t, { score: 14860, best: 14860 })',
+    (c, t) => { drawSampleScene(c, t, 'quiet'); drawWin(c, t, { score: 14860, best: 14860 }); }],
+  ['7a. PAUSE',
+    (c, t) => { drawSampleScene(c, t, 'fight'); drawPause(c); }],
+  ['7b. CALLOUTS — ALAS! at t=0.1, ZOUNDS! at t=0.45, POOR YORICK! at t=0.85 (one per shot, spawned at the kill centroid)',
+    (c, t) => { drawSampleScene(c, t, 'fight'); drawCallout(c, 300, 260, 'ALAS!', 0.1); drawCallout(c, 690, 300, 'ZOUNDS!', 0.45); drawCallout(c, 780, 440, 'POOR YORICK!', 0.85); }],
+];
+const root = document.getElementById('root');
+const T0 = 0.9;   // a fixed "time" so pulses/flicker land mid-phase in the screenshot
+for (const [title, fn] of screens) {
+  const h = document.createElement('div'); h.className = 'lbl'; h.textContent = title; root.appendChild(h);
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H; root.appendChild(cv);
+  fn(cv.getContext('2d'), T0);
+}
+</script>
+<!--
+============================================================================
+NOTES FOR THE CODER — lifting the UI
+============================================================================
+
+FONTS (only two, both system):
+  FONT_SERIF(px, italic)  = 'bold [italic] Npx Georgia, "Times New Roman", serif'
+      used ONLY for the five serif moments (§10): title block (title + subtitle), wave card, callouts, the game-over quote, the win line.
+  FONT_SANS(px, regular)  = 'bold Npx -apple-system, "Segoe UI", Helvetica, Arial, sans-serif'
+      everything else, UPPERCASE, letter-spaced 1.5–6 px. `regular` = true drops bold (used once: the Blessing card's one line).
+
+TEXT HELPER  text(ctx, str, x, y, font, color, align, { spacing, shadow, stroke, baseline })
+  Letter spacing is done by hand (per-glyph fillText) so it works in every browser; measure() matches it. shadow = N draws the same string in ink at (+N,+N) first: our drop shadow, no shadowBlur. stroke = N strokes in ink under the fill (callouts). wrap(ctx, str, font, maxW) returns lines.
+  fillText is the slowest primitive: the HUD draws ~6 strings a frame, everything else is a screen. Fine.
+
+SIZES / POSITIONS (960x540 logical)
+  Title: 'GET THEE TO' serif 56 at (72,150); 'A NUNNERY' serif 98 at (68,244); amber rule 380x2 at (72,262); subtitle italic serif 28 amber at (74,302); hint sans 13 spacing 2 at (74,350), alpha pulses 0.5..1 at 0.7 Hz; HARD HABIT pill 214x34 at (66,388) with an H keycap; 'BEST n · WAVE n' sans 14 at (72,504); M keycap + MUTE/MUTED right-aligned to x=888 at y=502. Hero: drawNunWithGun(ctx, 745, 476, 4.6, PI-0.55, 0.2). Background: drawArenaBase(t, torch 1) → dim 0.42 → vignette → menace enemies at alpha 0.6 → hero → text.
+  HUD (never outside a 40 px band top and bottom): hearts pill at (14,8) 1.7x, 27 px step, first heart x=36 y=34; wave name sans 12 spacing 3 centred at y=25 in a pill ≥300 wide; boss bar 300x7 at (W/2-150,30), purple fill, gold tip; score sans 26 right-aligned to x=930 at y=34, multiplier sans 17 amber to its left pop-scaled 1.35→1 over 0.25 s from popT, CHAIN n sans 10 to the left of that; shells pill at (14,H-40), pips 1.6x at 14 px step from x=32, baseline H-13, gun state sans 10 spacing 2.5 after the pips (READY cream, PUMPING amber, LOADING amber pulsing 2.5 Hz; the next-to-load pip pulses alpha 0.15..0.75).
+  Reticle: r = clamp(dist * tan(11°), 6, 60). In range: amber ring 2.5 px + 4 ticks + centre dot. Beyond: cream 0.7 dashed [7,6] 1.5 px + dot. Both sit on an ink ring 0.55 alpha for contrast.
+  Wave card: centred at (W/2, 0.42H); band 640x96 (124 with sub); name serif 52 spacing 2; sub italic serif 22 amber spacing 5.
+  Cards: header sans 22 spacing 6 at y=74; three cards 224x286 with 36 px gaps starting x=W/2-372, y=118; hovered card lifts 10 px, brighter fill (#1d1e33 vs #12131f), 4 px border, pulsing outer ring. Seal circle r31 at (cx, y+66) with an ink cross; name sans 19 wrapped ≤190 px around y+135; line sans 15 regular wrapped ≤180 px from y+196; stack pips r5.5 at y+250 (only when max>1); keycaps 1/2/3 at y0+ch+16. Click targets = the card rects (224x286).
+  Game over: quote italic serif 30 wrapped ≤760 from y=152; then rule; SCORE label sans 13; number sans 58; BEST sans 14; NEW BEST tag rotated −0.14 rad to the right of the number with 8 amber rays, pulsing 5%; NEW BLESSING pill amber sans 15 spacing 3; CLICK TO RETRY sans 13 spacing 4 at y=482 pulsing.
+  Win: band 740x152 at y=160; line serif 56; ENCORE hint sans 14 pulsing; score sans 28 at y=372; nun 3x at (760,488) facing left; crown on the floor at (700,484).
+  Pause: PAUSED sans 40 spacing 12; hint sans 13 spacing 4.
+
+TWEENS (all pure functions of t in seconds)
+  easeOutBack(x): 1 + 2.70158*(x-1)^3 + 1.70158*(x-1)^2     easeOutCubic(x): 1-(1-x)^3
+  waveCardTween(t): scale = t<0.3 ? 1.6 - 0.6*easeOutBack(t/0.3) : 1; alpha = t<1 ? min(1,t/0.06) : 1-(t-1). Card lifetime 2 s. Trigger spawning at t≈0.6.
+  callout(t): scale = 0.5 + 0.5*easeOutBack(min(1,t/0.22)); rise = 44*easeOutCubic(t); alpha = t<0.55 ? 1 : 1-(t-0.55)/0.45. Lifetime 1 s. One per shot, at the centroid of that shot's kills, clamped 40 px inside the arena.
+  multiplier pop: scale = 1 + 0.35*(1 - min(1, popT/0.25)).
+  pulse(t, hz, lo, hi) = lo + (hi-lo)*(0.5+0.5*sin(t*hz*2π)).
+
+CACHED ONCE, NEVER PER FRAME
+  VIGNETTE (960x540 radial, transparent centre → black 0.75 at the corners) drawn with drawImage at alpha 0.5–1.
+  GLOW blob (128x128 amber radial) blitted with 'lighter' + globalAlpha for torches, gate telegraphs and the muzzle flash light. This replaces the gradient inside drawGate from sprites-scratch.html: call drawGate(..., glow=0) and glowBlob(x, y, 70, glow) under it.
+  Keycaps, pills, rules are plain rrect/fillRect: free.
+
+DATA SHAPES
+  drawTitle(ctx, t, { best, bestWave, hardHabitUnlocked, hardHabitOn, muted })
+  drawHUD(ctx, { hp, maxHp, shells, maxShells, gunState:'READY'|'PUMPING'|'LOADING', score, mult, chain, waveName, bossHp:0..1|null, t, popT })
+  drawReticle(ctx, x, y, distFromNun, inRange)
+  drawWaveCard(ctx, t, name, sub?)
+  drawCards(ctx, [{ name, line, color, stacks, max }], hoverIndex, t)      max ≤ 1 → no pips
+  drawGameOver(ctx, t, { score, best, isNewBest, quote, newUnlock|null })
+  drawWin(ctx, t, { score, best })
+  drawPause(ctx)      drawCallout(ctx, x, y, str, t)
+
+DEVIATIONS FROM THE §10 TEXT LIST (all strings kept; presentation only)
+  1. The title hint and every other instruction line are sans UPPERCASE with letter spacing (house style for non-serif text); the serif stays on the title, subtitle, wave card, callouts, quote, win line. The strings are unchanged.
+  2. 'SCORE 8,120' on the game-over screen is set as a small SCORE label over a large number for hierarchy; same words.
+  3. HARD HABIT toggle shows an H keycap and ON/OFF: a toggle needs a key, I propose H. Muted state reads 'M MUTED' in amber instead of 'M mute'.
+  4. Blessing card lines are sentence case, regular weight (the only non-bold sans): bold caps under a bold caps name had no hierarchy.
+  5. Win screen adds 'BEST n' under the score (optional; pass best: null to hide).
+  6. Card colours are my suggestion: Holy Buckshot amber, Sawn-Off ghost cyan, Grace heart red; assign one palette colour per Blessing in the BLESSINGS table.
+-->
+</body>
+</html>
