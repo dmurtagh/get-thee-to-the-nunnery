@@ -1,0 +1,694 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Nunnery — sprite scratch</title>
+<style>
+  html, body { margin: 0; background: #1b1f3a; color: #f4f0e6; font: 12px/1.4 -apple-system, Helvetica, Arial, sans-serif; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1400" height="1372"></canvas>
+<script>
+'use strict';
+
+// ============================================================================
+// ==== PALETTE  (design doc §11, plus the additions listed in the notes below)
+// ============================================================================
+const P = {
+  // §11 palette
+  floor: '#1b1f3a', floorLine: '#151830', border: '#5a6078', amber: '#ffb347',
+  green: '#7bd389', greenShade: '#4f9a5c', bone: '#f4f0e6', ghost: '#8fe3ff',
+  muzzle: '#fff3c4', cream: '#f4f0e6', purple: '#7b3fa0', gold: '#ffd166', brass: '#d9a441',
+  // additions (see notes)
+  ink: '#07070d',            // the 2px outline on everything
+  habit: '#262633',          // nun's habit: charcoal, NOT pure black, so it separates from the floor
+  habitHi: '#3c3c4e',        // habit highlight tone
+  skin: '#f2c29b',           // nun's face and hands
+  eye: '#14141c',
+  shoe: '#111118',
+  gunDark: '#2b2e3a', gunHi: '#4d515f', stock: '#6b4226', stockHi: '#8a5a34', pump: '#8a8f9c',
+  boneShade: '#cfc9ba',
+  greyGreen: '#8a9c8c', greyGreenShade: '#5d6f60',   // Gravedigger
+  purpleShade: '#56297a', paleFace: '#d8c3e0',        // Claudius
+  ghostShade: '#5fb5d6',
+  heart: '#e0475a', heartHi: '#ff8a96',
+  brassDark: '#a87a2c',
+  borderHi: '#7c8398', gateDark: '#0d0f1c',
+  shadow: 'rgba(0,0,0,0.35)',
+};
+
+// ============================================================================
+// ==== SPRITES  (liftable: every function is self-contained + these 4 helpers)
+// Pivot: (x, y) is the FEET (bottom-centre) unless noted. s = scale, 1 = in-game size.
+// All geometry is in local units; ctx.scale(s) makes the 2px outline scale too.
+// ============================================================================
+const TAU = Math.PI * 2;
+
+function shadow(ctx, x, y, rx, ry) {
+  ctx.fillStyle = P.shadow; ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, TAU); ctx.fill();
+}
+function ell(ctx, x, y, rx, ry, fill, stroke, lw, rot) {
+  ctx.beginPath(); ctx.ellipse(x, y, rx, ry, rot || 0, 0, TAU);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.lineWidth = lw || 2; ctx.strokeStyle = stroke; ctx.stroke(); }
+}
+function rrect(ctx, x, y, w, h, r, fill, stroke, lw) {
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.lineWidth = lw || 2; ctx.strokeStyle = stroke; ctx.stroke(); }
+}
+// outlined thick line (limbs): ink underlay then colour
+function limb(ctx, x1, y1, x2, y2, w, colour) {
+  ctx.lineCap = 'round';
+  ctx.lineWidth = w + 3; ctx.strokeStyle = P.ink; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  ctx.lineWidth = w; ctx.strokeStyle = colour; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  ctx.lineCap = 'butt';
+}
+
+// ---------------------------------------------------------------- THE NUN
+// o = { facing: 1|-1 (flip when aim crosses vertical), lean: radians around the feet, walk: 0|1 }
+// Height ~31 px at s=1 (feet to veil top). Hand pivot for the gun: NUN_HAND.
+const NUN_HAND = { x: 2.5, y: -14.5 };
+function drawNun(ctx, x, y, s, o) {
+  o = o || {};
+  const facing = o.facing || 1, walk = o.walk || 0;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s * facing, s);
+  if (o.shadow !== false) shadow(ctx, 0, 0, 9, 3);
+  ctx.rotate(o.lean || 0);
+  ctx.lineJoin = 'round';
+  // shoes
+  const step = walk ? 1.5 : 0;
+  rrect(ctx, -7 + step, -3.2, 5.5, 3.2, 1.2, P.shoe, P.ink, 1);
+  rrect(ctx, 1.5 - step, -3.2, 5.5, 3.2, 1.2, P.shoe, P.ink, 1);
+  // veil (behind everything): cap over the head, trailing to the shoulders
+  ctx.beginPath();
+  ctx.moveTo(-9, -12);
+  ctx.quadraticCurveTo(-10.2, -22, -7.6, -26.8);
+  ctx.quadraticCurveTo(-3.6, -31.4, 0, -31.4);
+  ctx.quadraticCurveTo(3.6, -31.4, 7.6, -26.8);
+  ctx.quadraticCurveTo(10.2, -22, 9, -12);
+  ctx.quadraticCurveTo(0, -10, -9, -12);
+  ctx.closePath();
+  ctx.fillStyle = P.habit; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = P.ink; ctx.stroke();
+  // habit: bell
+  ctx.beginPath();
+  ctx.moveTo(-5.2, -18.5); ctx.lineTo(5.2, -18.5);
+  ctx.quadraticCurveTo(9, -11, 9.8, -1.5);
+  ctx.quadraticCurveTo(0, 0.6, -9.8, -1.5);
+  ctx.quadraticCurveTo(-9, -11, -5.2, -18.5);
+  ctx.closePath();
+  ctx.fillStyle = P.habit; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = P.ink; ctx.stroke();
+  // habit highlight (light from upper-left)
+  ctx.beginPath();
+  ctx.moveTo(-4.4, -17.5);
+  ctx.quadraticCurveTo(-7.6, -11, -8.2, -2.8);
+  ctx.lineTo(-5.6, -2.6);
+  ctx.quadraticCurveTo(-5.6, -11, -2.4, -17.5);
+  ctx.closePath();
+  ctx.fillStyle = P.habitHi; ctx.fill();
+  // scapular strip
+  rrect(ctx, -2.1, -17.8, 4.2, 15.3, 0.6, P.bone, P.ink, 1);
+  // gold cross
+  ctx.fillStyle = P.gold;
+  ctx.fillRect(-0.75, -15.6, 1.5, 5.2);
+  ctx.fillRect(-2.4, -14.2, 4.8, 1.5);
+  // coif ring (white, wider than the head) — THE nun silhouette
+  ell(ctx, 0, -22, 6.7, 7, P.bone, P.ink, 2);
+  // face
+  ell(ctx, 0, -21.6, 3.9, 4.7, P.skin);
+  // eyes + deadpan mouth
+  ctx.fillStyle = P.eye;
+  ctx.fillRect(-2.4, -22.9, 1.5, 1.7);
+  ctx.fillRect(0.9, -22.9, 1.5, 1.7);
+  ctx.fillRect(-0.8, -19.4, 1.6, 0.8);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- THE SHOTGUN
+// (x, y) = pivot at the nun's hand. angle in radians (canvas coords, +y down).
+// pumpOffset 0..1: 0 = forward/ready, 1 = fully racked back (5 px). Muzzle at local (GUN_MUZZLE, 0).
+// Too long on purpose: 38.5 px at s=1 (~1.25x the nun).
+const GUN_MUZZLE = 28;
+function drawGun(ctx, x, y, s, angle, pumpOffset) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s, s);
+  ctx.rotate(angle);
+  if (Math.cos(angle) < 0) ctx.scale(1, -1);   // keep the stock hanging down when aiming left
+  ctx.lineJoin = 'round';
+  // stock
+  ctx.beginPath();
+  ctx.moveTo(-1, -2); ctx.lineTo(-1, 2.2); ctx.lineTo(-10, 4.6); ctx.lineTo(-10.5, 1); ctx.closePath();
+  ctx.fillStyle = P.stock; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = P.ink; ctx.stroke();
+  ctx.strokeStyle = P.stockHi; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(-2, -0.6); ctx.lineTo(-9, 1.6); ctx.stroke();
+  // rear hand at the grip
+  ell(ctx, 0.5, 2, 2, 1.7, P.skin, P.ink, 1);
+  // receiver
+  rrect(ctx, -2, -2.4, 10, 4.8, 1, P.gunDark, P.ink, 2);
+  // barrel
+  rrect(ctx, 7, -1.6, GUN_MUZZLE - 7, 3.2, 0.6, P.gunDark, P.ink, 2);
+  ctx.fillStyle = P.gunHi; ctx.fillRect(8, -1.4, GUN_MUZZLE - 9, 1);
+  // muzzle cap
+  rrect(ctx, GUN_MUZZLE - 2, -2.1, 2.4, 4.2, 0.6, P.pump, P.ink, 1.5);
+  // pump block + front hand
+  const px = 13 - 5 * (pumpOffset || 0);
+  rrect(ctx, px, -2.6, 7, 5.2, 1, P.pump, P.ink, 2);
+  ell(ctx, px + 3.5, 1.6, 2.1, 1.7, P.skin, P.ink, 1);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- THE RESTLESS (and the Ghost body)
+// frame 0|1 = 2-frame walk. ~26 px tall. Faces +x; flip with ctx.scale(-1,1) around x.
+function drawRestlessBody(ctx, frame, pal, ghost) {
+  ctx.lineJoin = 'round';
+  if (!ghost) {
+    shadow(ctx, 0, 0, 8, 2.6);
+    // legs: apart / together
+    const xs = frame ? [-3.2, -0.2] : [-5.5, 1.5];
+    for (const lx of xs) {
+      rrect(ctx, lx, -7.5, 3, 7.5, 1, pal.shade, P.ink, 1.5);
+      rrect(ctx, lx - 0.5, -1.8, 4.2, 1.8, 0.6, P.shoe, P.ink, 1);
+    }
+  } else {
+    // wavy floating hem instead of legs
+    const w = frame ? 1.5 : -1.5;
+    ctx.beginPath();
+    ctx.moveTo(-6.2, -6);
+    ctx.quadraticCurveTo(-8, -1 + w, -5.5, 1.5);
+    ctx.quadraticCurveTo(-2.5, -1 - w, 0, 1.5);
+    ctx.quadraticCurveTo(2.5, -1 + w, 5.5, 1.5);
+    ctx.quadraticCurveTo(8, -1 - w, 6.2, -6);
+    ctx.closePath();
+    ctx.fillStyle = pal.shade; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = P.ink; ctx.stroke();
+  }
+  // back arm (hanging forward, zombie style)
+  limb(ctx, -1, -13.5, 4.5, -3.5, 3, pal.shade);
+  ell(ctx, 4.8, -3, 1.9, 1.7, pal.base, P.ink, 1);
+  // hunched torso
+  ctx.beginPath();
+  ctx.moveTo(-6, -6);
+  ctx.quadraticCurveTo(-8.5, -13, -3, -16.5);
+  ctx.lineTo(5.5, -16.5);
+  ctx.quadraticCurveTo(8, -11, 6, -6);
+  ctx.quadraticCurveTo(0, -4.5, -6, -6);
+  ctx.closePath();
+  ctx.fillStyle = pal.base; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = P.ink; ctx.stroke();
+  // shade tone on the right
+  ctx.beginPath();
+  ctx.moveTo(3, -16.2);
+  ctx.quadraticCurveTo(7.6, -11, 5.8, -6.3);
+  ctx.lineTo(2.4, -5.7);
+  ctx.quadraticCurveTo(4.8, -11, 3, -16.2);
+  ctx.closePath();
+  ctx.fillStyle = pal.shade; ctx.fill();
+  // front arm
+  limb(ctx, 4, -13.5, 9, -4, 3, pal.shade);
+  ell(ctx, 9.3, -3.5, 1.9, 1.7, pal.base, P.ink, 1);
+  // Elizabethan ruff: scallops then disc
+  const rx0 = 2.5, ry0 = -16.6;
+  ctx.fillStyle = pal.ruff; ctx.strokeStyle = P.ink; ctx.lineWidth = 1;
+  for (let i = 0; i < 9; i++) {
+    const a = (i / 9) * TAU;
+    ctx.beginPath(); ctx.ellipse(rx0 + Math.cos(a) * 6, ry0 + Math.sin(a) * 2.4, 1.7, 1.5, 0, 0, TAU); ctx.fill(); ctx.stroke();
+  }
+  ell(ctx, rx0, ry0, 6, 2.3, pal.ruff, P.ink, 1);
+  // head, tilted forward
+  ell(ctx, 4.5, -21, 4.7, 4.2, pal.base, P.ink, 2, 0.35);
+  // hair tufts
+  ctx.fillStyle = P.ink;
+  ctx.fillRect(1.6, -25.4, 1, 2.2); ctx.fillRect(3.6, -26, 1, 2.6); ctx.fillRect(5.8, -25.6, 1, 2);
+  // sunken sockets + mouth
+  ell(ctx, 3.1, -21.6, 1.4, 1.5, P.ink);
+  ell(ctx, 6.4, -21, 1.4, 1.5, P.ink);
+  ctx.fillRect(5, -18.9, 2.4, 1);
+}
+const PAL_RESTLESS = { base: P.green, shade: P.greenShade, ruff: P.bone };
+function drawRestless(ctx, x, y, s, frame) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  drawRestlessBody(ctx, frame, PAL_RESTLESS, false);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- THE GHOST (SHOULD)
+// 50%-alpha cyan Restless silhouette, no shadow, no legs, crown outline, wavers by frame.
+const PAL_GHOST = { base: P.ghost, shade: P.ghostShade, ruff: '#dff7ff' };
+function drawGhost(ctx, x, y, s, frame) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  ctx.globalAlpha = 0.5;
+  ctx.transform(1, 0, frame ? 0.08 : -0.08, 1, 0, 0);   // waver: tiny shear
+  drawRestlessBody(ctx, frame, PAL_GHOST, true);
+  // crown outline on the head
+  ctx.lineWidth = 1.4; ctx.strokeStyle = P.gold; ctx.lineJoin = 'miter';
+  ctx.beginPath();
+  ctx.moveTo(1.2, -24.2); ctx.lineTo(1.2, -28); ctx.lineTo(3.2, -26); ctx.lineTo(4.8, -29); ctx.lineTo(6.4, -26); ctx.lineTo(8.4, -28); ctx.lineTo(8.4, -24.2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- YORICK (skull)
+// frame 0|1 = jaw shut / jaw chattering open. ~15 px tall.
+function drawYorick(ctx, x, y, s, frame) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  ctx.lineJoin = 'round';
+  shadow(ctx, 0, 0, 5, 1.7);
+  const jaw = frame ? 1.6 : 0;
+  // jaw
+  rrect(ctx, -4.2, -6 + jaw, 8.4, 4, 1.2, P.bone, P.ink, 1.5);
+  ctx.fillStyle = P.ink;
+  for (const tx of [-2.6, -0.6, 1.4]) ctx.fillRect(tx, -6 + jaw, 1.1, 1.6);
+  // cranium
+  ell(ctx, 0, -9.8, 6.2, 5.6, P.bone, P.ink, 2);
+  // shade tone on the right
+  ctx.beginPath();
+  ctx.moveTo(2.2, -14.8);
+  ctx.quadraticCurveTo(7.4, -11.5, 4.6, -5.2);
+  ctx.quadraticCurveTo(4.4, -9.5, 2.2, -14.8);
+  ctx.closePath();
+  ctx.fillStyle = P.boneShade; ctx.fill();
+  // sockets + nose
+  ell(ctx, -2.5, -10.2, 1.8, 2, P.ink);
+  ell(ctx, 2.5, -10.2, 1.8, 2, P.ink);
+  ctx.fillStyle = P.ink; ctx.beginPath(); ctx.moveTo(0, -8.4); ctx.lineTo(-0.9, -6.6); ctx.lineTo(0.9, -6.6); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- BRUTE (Gravedigger / Claudius)
+// ~50 px tall at k=1 (plus the shovel over the shoulder). frame 0|1 = lumbering step.
+// pal = { base, shade, head }, accessory = 'shovel' | 'goblet', crown = bool
+function drawBrute(ctx, frame, pal, accessory, crown) {
+  ctx.lineJoin = 'round';
+  const bob = frame ? 1.2 : 0;
+  shadow(ctx, 0, 0, 17, 5);
+  // legs
+  const xs = frame ? [-9.5, 1] : [-12, 3.5];
+  for (const lx of xs) {
+    rrect(ctx, lx, -11, 8.5, 11, 2, pal.shade, P.ink, 2);
+    rrect(ctx, lx - 0.8, -3, 10, 3, 1, P.shoe, P.ink, 1.2);
+  }
+  ctx.translate(0, -bob);
+  // shovel handle behind (over the shoulder)
+  if (accessory === 'shovel') {
+    limb(ctx, 19, -14, -3, -52, 3, P.stock);
+    ctx.beginPath(); ctx.moveTo(-9, -60); ctx.lineTo(0, -58); ctx.lineTo(0.5, -47); ctx.lineTo(-7.5, -49); ctx.closePath();
+    ctx.fillStyle = P.pump; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = P.ink; ctx.stroke();
+    ctx.fillStyle = P.gunHi; ctx.fillRect(-7.5, -57.5, 1.4, 8);
+  }
+  // back arm
+  limb(ctx, -14, -32, -18, -12, 7, pal.base);
+  ell(ctx, -18.5, -9.5, 4.2, 3.6, pal.base, P.ink, 2);
+  // torso
+  ctx.beginPath();
+  ctx.moveTo(-17, -9);
+  ctx.quadraticCurveTo(-21, -30, -9, -39);
+  ctx.quadraticCurveTo(0, -42, 9, -39);
+  ctx.quadraticCurveTo(21, -30, 17, -9);
+  ctx.quadraticCurveTo(0, -5, -17, -9);
+  ctx.closePath();
+  ctx.fillStyle = pal.base; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = P.ink; ctx.stroke();
+  // shade tone right
+  ctx.beginPath();
+  ctx.moveTo(6, -39.6);
+  ctx.quadraticCurveTo(20.2, -30, 16.6, -9.4);
+  ctx.lineTo(9, -7.6);
+  ctx.quadraticCurveTo(12.5, -25, 6, -39.6);
+  ctx.closePath();
+  ctx.fillStyle = pal.shade; ctx.fill();
+  // strap
+  ctx.beginPath(); ctx.moveTo(-15, -22); ctx.lineTo(15, -19); ctx.lineTo(15, -15); ctx.lineTo(-15, -18); ctx.closePath();
+  ctx.fillStyle = pal.shade; ctx.fill(); ctx.lineWidth = 1.2; ctx.strokeStyle = P.ink; ctx.stroke();
+  // head, sunk into the shoulders
+  ell(ctx, 2, -43, 6.6, 6.2, pal.head, P.ink, 2);
+  ctx.fillStyle = P.ink;
+  ctx.fillRect(-2.6, -46.2, 9.6, 1.7);           // brow
+  ell(ctx, 0.2, -43.6, 1.15, 1.2, P.ink);        // eyes, close together
+  ell(ctx, 4.6, -43.6, 1.15, 1.2, P.ink);
+  ctx.fillRect(1, -40.2, 3.4, 1);                // mouth
+  if (crown) {
+    ctx.beginPath();
+    ctx.moveTo(-3.5, -47.5); ctx.lineTo(-3.5, -54); ctx.lineTo(-0.8, -50.5); ctx.lineTo(2, -55.5); ctx.lineTo(4.8, -50.5); ctx.lineTo(7.5, -54); ctx.lineTo(7.5, -47.5);
+    ctx.closePath();
+    ctx.fillStyle = P.gold; ctx.fill(); ctx.lineWidth = 1.6; ctx.strokeStyle = P.ink; ctx.lineJoin = 'miter'; ctx.stroke(); ctx.lineJoin = 'round';
+  }
+  // front arm + fist
+  limb(ctx, 14, -32, 20, -15, 7, pal.base);
+  ell(ctx, 20.5, -13, 4.2, 3.6, pal.base, P.ink, 2);
+  if (accessory === 'goblet') {
+    rrect(ctx, 17, -25, 7.5, 8, 1.5, P.gold, P.ink, 1.6);       // cup
+    ctx.fillStyle = P.ink; ctx.fillRect(20, -17, 1.6, 4);        // stem
+    ell(ctx, 20.8, -12.4, 3.4, 1.3, P.gold, P.ink, 1.2);         // foot
+    ctx.fillStyle = P.muzzle; ctx.fillRect(18.2, -24, 1.2, 5);   // highlight
+  }
+}
+const PAL_GRAVEDIGGER = { base: P.greyGreen, shade: P.greyGreenShade, head: P.greyGreen };
+const PAL_CLAUDIUS = { base: P.purple, shade: P.purpleShade, head: P.paleFace };
+function drawGravedigger(ctx, x, y, s, frame) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  drawBrute(ctx, frame, PAL_GRAVEDIGGER, 'shovel', false);
+  ctx.restore();
+}
+// Claudius: the Gravedigger at 3x, purple, crown, goblet. s=1 means the in-game (3x) size.
+function drawClaudius(ctx, x, y, s, frame) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s * 3, s * 3);
+  drawBrute(ctx, frame, PAL_CLAUDIUS, 'goblet', true);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- HUD + small things
+// Heart: pivot bottom-centre (the point). ~11 x 10 px.
+function drawHeart(ctx, x, y, s) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s); ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.bezierCurveTo(-6.2, -4.2, -6.4, -10.4, -2.8, -10.4);
+  ctx.quadraticCurveTo(-0.9, -10.4, 0, -8.2);
+  ctx.quadraticCurveTo(0.9, -10.4, 2.8, -10.4);
+  ctx.bezierCurveTo(6.4, -10.4, 6.2, -4.2, 0, 0);
+  ctx.closePath();
+  ctx.fillStyle = P.heart; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = P.ink; ctx.stroke();
+  ell(ctx, -2.7, -7.6, 1.3, 0.9, P.heartHi, null, 0, -0.5);
+  ctx.restore();
+}
+// Shell pip for the HUD tube: pivot bottom-centre, 5 x 10 px. empty=true draws a hollow spent pip.
+function drawShellPip(ctx, x, y, s, empty) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  if (empty) {
+    ctx.globalAlpha = 0.35;
+    rrect(ctx, -2.5, -10, 5, 10, 1.2, null, P.cream, 1.2);
+  } else {
+    rrect(ctx, -2.5, -10, 5, 7.6, 1.2, P.amber, P.ink, 1.2);
+    rrect(ctx, -2.5, -3, 5, 3, 0.6, P.brass, P.ink, 1.2);
+    ctx.fillStyle = P.muzzle; ctx.fillRect(-1.6, -9, 1, 5.6);
+  }
+  ctx.restore();
+}
+// Ejected casing: pivot CENTRE (it tumbles), 5.2 x 2.6 px, rot in radians.
+function drawCasing(ctx, x, y, s, rot) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s); ctx.rotate(rot || 0);
+  rrect(ctx, -2.6, -1.3, 5.2, 2.6, 0.8, P.brass, P.ink, 1);
+  ctx.fillStyle = P.brassDark; ctx.fillRect(-2.6, -1.3, 1.5, 2.6);
+  ctx.fillStyle = P.muzzle; ctx.fillRect(-0.8, -1, 2.6, 0.7);
+  ctx.restore();
+}
+// Gate in the border wall. (x, y) = centre of the opening on the wall's centre-line.
+// side: 'N'|'E'|'S'|'W' (which edge of the arena it sits on). glow 0..1 = amber telegraph.
+// 48 wide x 16 deep at s=1 (the border is 16 px).
+function drawGate(ctx, x, y, s, side, glow) {
+  const rot = { N: 0, E: Math.PI / 2, S: Math.PI, W: -Math.PI / 2 }[side] || 0;
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s); ctx.rotate(rot);   // local: wall along x, arena is +y
+  // glow (telegraph) — the game pre-renders this blob once; here it is a cheap gradient
+  if (glow > 0) {
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    const g = ctx.createRadialGradient(0, 8, 2, 0, 8, 46);
+    g.addColorStop(0, 'rgba(255,179,71,' + (0.55 * glow).toFixed(3) + ')');
+    g.addColorStop(1, 'rgba(255,179,71,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 8, 46, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+  // wall slab around the opening
+  ctx.fillStyle = P.border; ctx.fillRect(-30, -8, 60, 16);
+  // the opening: a dark tunnel
+  rrect(ctx, -14, -8.5, 28, 17, 0.8, P.gateDark, P.ink, 2);
+  // tunnel floor tint when telegraphing
+  if (glow > 0) { ctx.fillStyle = 'rgba(255,179,71,' + (0.45 * glow).toFixed(3) + ')'; ctx.fillRect(-12, 1, 24, 6); }
+  // steps
+  ctx.fillStyle = P.borderHi; ctx.fillRect(-12, -3, 24, 1.2); ctx.fillRect(-12, 2, 24, 1.2);
+  // posts
+  rrect(ctx, -19, -9.5, 5, 19, 1, P.borderHi, P.ink, 2);
+  rrect(ctx, 14, -9.5, 5, 19, 1, P.borderHi, P.ink, 2);
+  // torches on the arena side of the posts
+  const t = 0.6 + 0.4 * (glow || 0);
+  ell(ctx, -16.5, 8.5, 2.2, 2.2, P.amber, P.ink, 1);
+  ell(ctx, 16.5, 8.5, 2.2, 2.2, P.amber, P.ink, 1);
+  ctx.globalAlpha = t; ell(ctx, -16.5, 8.5, 1, 1, P.muzzle); ell(ctx, 16.5, 8.5, 1, 1, P.muzzle); ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- composition helper (liftable)
+// Draw order rule: gun OVER the body when aiming down (sin(angle) >= 0), UNDER when aiming up.
+// Body flips when cos(angle) < 0. Hand pivot = feet + (NUN_HAND.x * s * facing, NUN_HAND.y * s).
+function drawNunWithGun(ctx, x, y, s, angle, pumpOffset, o) {
+  o = Object.assign({}, o || {});
+  const facing = Math.cos(angle) < 0 ? -1 : 1;
+  o.facing = facing;
+  const hx = x + NUN_HAND.x * s * facing, hy = y + NUN_HAND.y * s;
+  if (Math.sin(angle) >= 0) { drawNun(ctx, x, y, s, o); drawGun(ctx, hx, hy, s, angle, pumpOffset); }
+  else { drawGun(ctx, hx, hy, s, angle, pumpOffset); drawNun(ctx, x, y, s, o); }
+}
+
+// ============================================================================
+// ==== SCRATCH PAGE  (layout, labels, tests) — not for lifting
+// ============================================================================
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+ctx.fillStyle = P.floor; ctx.fillRect(0, 0, cv.width, cv.height);
+
+function label(text, x, y, big) {
+  ctx.save(); ctx.font = (big ? 'bold 13px' : '11px') + ' -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillStyle = big ? P.amber : 'rgba(244,240,230,0.75)'; ctx.textBaseline = 'top'; ctx.fillText(text, x, y); ctx.restore();
+}
+function baseline(x1, x2, y) { ctx.save(); ctx.strokeStyle = 'rgba(244,240,230,0.12)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x1, y + 0.5); ctx.lineTo(x2, y + 0.5); ctx.stroke(); ctx.restore(); }
+function panel(x, y, w, h, title) { ctx.save(); ctx.strokeStyle = 'rgba(244,240,230,0.15)'; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, y + 0.5, w, h); ctx.restore(); label(title, x + 8, y + 6, true); }
+
+// white silhouette (hit flash) of any draw fn
+function silhouette(drawFn, w, h, s) {
+  const off = document.createElement('canvas'); off.width = w; off.height = h;
+  const o = off.getContext('2d'); drawFn(o, w / 2, h - 6, s);
+  o.globalCompositeOperation = 'source-in'; o.fillStyle = '#fff'; o.fillRect(0, 0, w, h);
+  return off;
+}
+// pre-render at 2x, blit at 1x (how the game will do it)
+function prerender(drawFn, w, h, k) {
+  const off = document.createElement('canvas'); off.width = w * k; off.height = h * k;
+  const o = off.getContext('2d'); drawFn(o, (w / 2) * k, (h - 4) * k, k);
+  return off;
+}
+
+// ---- Panel A: scale test ---------------------------------------------------
+panel(20, 12, 1360, 330, 'A. SCALE TEST — 1x / 2x / 4x  (feet on the baseline)');
+{
+  const by = 258; baseline(30, 1370, by);
+  const items = [
+    ['Nun + gun', (c, x, y, s) => drawNunWithGun(c, x, y, s, 0.45, 0), [60, 115, 230], 44],
+    ['Restless', drawRestless, [400, 450, 545], 26],
+    ['Yorick', drawYorick, [650, 690, 750], 16],
+    ['Gravedigger', drawGravedigger, [850, 935, 1090], 60],
+    ['Ghost', drawGhost, [1230, 1285, 1350], 26],
+  ];
+  for (const [name, fn, xs, hgt] of items) {
+    [1, 2, 4].forEach((s, i) => { fn(ctx, xs[i], by, s, i % 2); label(s + 'x', xs[i] - 6, by + 5); });
+    label(name, xs[0] - 10, by + 19);
+  }
+  // small things + pre-render proof
+  const by2 = 326; baseline(30, 1370, by2);
+  [1, 2, 4].forEach((s, i) => drawHeart(ctx, 60 + i * 40, by2, s)); label('Heart 1x · 2x · 4x', 40, by2 + 3);
+  [1, 2, 4].forEach((s, i) => drawShellPip(ctx, 220 + i * 40, by2, s)); drawShellPip(ctx, 340, by2, 2, true); label('Shell pip 1x · 2x · 4x · empty', 200, by2 + 3);
+  [1, 2, 4].forEach((s, i) => drawCasing(ctx, 420 + i * 40, by2 - 6 * s, s, 0.5)); label('Casing 1x · 2x · 4x', 400, by2 + 3);
+  const prN = prerender((c, x, y, s) => drawNunWithGun(c, x, y, s, 0.45, 0), 64, 44, 2);
+  const prR = prerender(drawRestless, 40, 32, 2);
+  drawNunWithGun(ctx, 620, by2, 1, 0.45, 0); label('direct 1x', 596, by2 + 3);
+  ctx.drawImage(prN, 690 - 32, by2 + 4 - 44, 64, 44); label('1x via 2x pre-render', 650, by2 + 3);
+  drawRestless(ctx, 820, by2, 1, 0); label('direct 1x', 796, by2 + 3);
+  ctx.drawImage(prR, 880 - 20, by2 + 4 - 32, 40, 32); label('via 2x pre-render', 850, by2 + 3);
+  label('← pre-render check: the game draws each sprite once at 2x to an offscreen canvas and blits it at 1x', 960, by2 + 3);
+}
+
+// ---- Panel B: nun + gun, 8 aim angles ---------------------------------------
+panel(20, 354, 1360, 206, 'B. NUN + GUN — 8 aim angles at 3x (below: same at 1x). Gun over body when aiming down, under when up; body flips when aim crosses vertical.');
+{
+  const by = 498; baseline(30, 1370, by);
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * TAU, x = 110 + i * 165;
+    drawNunWithGun(ctx, x, by, 3, a, i === 2 ? 1 : 0);
+    label(Math.round((a * 180) / Math.PI) + '°' + (i === 2 ? '  (pump racked)' : ''), x - 14, by + 6);
+    drawNunWithGun(ctx, x, by + 52, 1, a, 0);
+  }
+  baseline(30, 1370, by + 52);
+}
+
+// ---- Panel C: walk frames + Claudius scale --------------------------------
+panel(20, 572, 1360, 190, 'C. WALK FRAMES f0 | f1 at 3x  ·  right: Claudius at 1x next to Gravedigger / Restless / Nun at 1x');
+{
+  const by = 738; baseline(30, 1370, by);
+  drawRestless(ctx, 80, by, 3, 0); drawRestless(ctx, 160, by, 3, 1); label('Restless f0 / f1', 60, by + 6);
+  drawYorick(ctx, 270, by, 3, 0); drawYorick(ctx, 330, by, 3, 1); label('Yorick f0 / f1', 258, by + 6);
+  drawGravedigger(ctx, 470, by, 2.4, 0); drawGravedigger(ctx, 600, by, 2.4, 1); label('Gravedigger f0 / f1 (2.4x)', 450, by + 6);
+  drawGhost(ctx, 740, by, 3, 0); drawGhost(ctx, 820, by, 3, 1); label('Ghost f0 / f1', 725, by + 6);
+  drawClaudius(ctx, 1000, by, 1, 0); label('Claudius 1x (3x brute)', 950, by + 6);
+  drawGravedigger(ctx, 1130, by, 1, 0); label('GD 1x', 1115, by + 6);
+  drawRestless(ctx, 1190, by, 1, 0); label('R 1x', 1180, by + 6);
+  drawNunWithGun(ctx, 1240, by, 1, 0.45, 0); label('Nun 1x', 1226, by + 6);
+  drawYorick(ctx, 1290, by, 1, 0); label('Y 1x', 1280, by + 6);
+}
+
+// ---- Panel D: hit flash --------------------------------------------------------
+panel(20, 774, 660, 150, 'D. HIT FLASH — draw normally, then source-in white (3x)');
+{
+  const by = 902; baseline(30, 670, by);
+  drawNunWithGun(ctx, 80, by, 3, 0.45, 0);
+  const sN = silhouette((c, x, y, s) => drawNunWithGun(c, x, y, s, 0.45, 0), 200, 120, 3);
+  ctx.drawImage(sN, 175 - 100, by + 6 - 120); label('nun → white', 150, by + 6);
+  drawRestless(ctx, 300, by, 3, 0);
+  const sR = silhouette(drawRestless, 120, 100, 3);
+  ctx.drawImage(sR, 380 - 60, by + 6 - 100); label('restless → white', 350, by + 6);
+  drawYorick(ctx, 480, by, 3, 1);
+  const sY = silhouette((c, x, y, s) => drawYorick(c, x, y, s, 1), 80, 70, 3);
+  ctx.drawImage(sY, 540 - 40, by + 6 - 70); label('yorick → white', 510, by + 6);
+}
+
+// ---- Panel F: squash / stretch / lean ----------------------------------------
+panel(700, 774, 680, 150, 'F. SQUASH / STRETCH / LEAN around the feet pivot (3x)');
+{
+  const by = 902; baseline(710, 1370, by);
+  const s = 3;
+  drawNunWithGun(ctx, 770, by, s, 0, 0); label('idle', 758, by + 6);
+  ctx.save(); ctx.translate(900, by); ctx.scale(1.18, 0.88); drawNunWithGun(ctx, 0, 0, s, 0, 1, { lean: -0.22 }); ctx.restore(); label('fire: stretch 1.18/0.88 + lean', 840, by + 6);
+  ctx.save(); ctx.translate(1050, by); ctx.scale(1.25, 0.8); drawNunWithGun(ctx, 0, 0, s, 0, 0); ctx.restore(); label('land: squash 1.25/0.8', 1000, by + 6);
+  const a = -Math.PI / 4;
+  ctx.save(); ctx.translate(1190, by); ctx.rotate(a); ctx.scale(1.2, 0.86); ctx.rotate(-a); drawNunWithGun(ctx, 0, 0, s, a, 1); ctx.restore(); label('stretch along aim −45°', 1140, by + 6);
+  drawNunWithGun(ctx, 1320, by, s, Math.PI, 0, { walk: 1 }); label('facing left, walk f1', 1275, by + 6);
+}
+
+// ---- Panel E: crowd test at 1x ---------------------------------------------
+panel(20, 936, 760, 250, 'E. CROWD TEST at 1x — 20 Restless in a clump, Yoricks, a Gravedigger, the nun, the Ghost, decals, on the real floor + border');
+{
+  const ax = 40, ay = 962, aw = 720, ah = 210;
+  ctx.save(); ctx.beginPath(); ctx.rect(ax, ay, aw, ah); ctx.clip();
+  ctx.fillStyle = P.floor; ctx.fillRect(ax, ay, aw, ah);
+  ctx.strokeStyle = P.floorLine; ctx.lineWidth = 2; ctx.beginPath();
+  for (let gx = ax; gx <= ax + aw; gx += 32) { ctx.moveTo(gx + 0.5, ay); ctx.lineTo(gx + 0.5, ay + ah); }
+  for (let gy = ay; gy <= ay + ah; gy += 32) { ctx.moveTo(ax, gy + 0.5); ctx.lineTo(ax + aw, gy + 0.5); }
+  ctx.stroke();
+  ctx.fillStyle = P.border; ctx.fillRect(ax, ay, aw, 16); ctx.fillRect(ax, ay + ah - 16, aw, 16); ctx.fillRect(ax, ay, 16, ah); ctx.fillRect(ax + aw - 16, ay, 16, ah);
+  ctx.strokeStyle = P.ink; ctx.lineWidth = 2; ctx.strokeRect(ax + 16, ay + 16, aw - 32, ah - 32);
+  drawGate(ctx, ax + aw / 2, ay + 8, 1, 'N', 1);
+  drawGate(ctx, ax + 8, ay + ah / 2, 1, 'W', 0);
+  const oy = ay - 940;   // crowd coordinates below were authored against ay = 940
+  ctx.globalAlpha = 0.55;
+  for (const [dx, dy, r] of [[300, 1090, 12], [330, 1100, 7], [520, 1030, 10]]) ell(ctx, dx, dy + oy, r, r * 0.55, P.greenShade);
+  ctx.globalAlpha = 1;
+  let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 6; i++) drawCasing(ctx, 250 + rnd() * 60, 1060 + oy + rnd() * 40, 1, rnd() * TAU);
+  const bodies = [];
+  for (let i = 0; i < 20; i++) { const a = rnd() * TAU, r = 12 + rnd() * 55; bodies.push({ y: 1055 + oy + Math.sin(a) * r * 0.7, x: 430 + Math.cos(a) * r, f: (c, x, y) => drawRestless(c, x, y, 1, i % 2) }); }
+  for (let i = 0; i < 8; i++) bodies.push({ x: 610 + rnd() * 90, y: 1000 + oy + rnd() * 120, f: (c, x, y) => drawYorick(c, x, y, 1, i % 2) });
+  bodies.push({ x: 140, y: 1120 + oy, f: (c, x, y) => drawGravedigger(c, x, y, 1, 0) });
+  bodies.push({ x: 260, y: 1045 + oy, f: (c, x, y) => drawNunWithGun(c, x, y, 1, 0.3, 0) });
+  bodies.push({ x: 560, y: 1130 + oy, f: (c, x, y) => drawGhost(c, x, y, 1, 0) });
+  bodies.sort((p, q) => p.y - q.y).forEach((b) => b.f(ctx, b.x, b.y));
+  ctx.restore();
+}
+
+// ---- Panel G: gates ---------------------------------------------------------
+panel(800, 936, 580, 250, 'G. GATES at 2x — N / E / S / W, glow 0 (top) and glow 1 (bottom)');
+{
+  const sides = ['N', 'E', 'S', 'W'];
+  sides.forEach((sd, i) => {
+    const x = 880 + i * 135;
+    [0, 1].forEach((g, j) => {
+      const y = 1007 + j * 110;
+      ctx.save(); ctx.fillStyle = P.floor; ctx.fillRect(x - 60, y - 45, 120, 90); ctx.restore();
+      drawGate(ctx, x, y, 2, sd, g);
+      label(sd + '  glow ' + g, x - 20, y + 40);
+    });
+  });
+}
+
+// ---- Panel H: the gate test ----------------------------------------------------
+panel(20, 1198, 1360, 162, 'H. THE GATE TEST — left: nun at 1x on the bare floor, 8 aim angles. Right: the SAME 1x pixels magnified 4x, nearest-neighbour (no re-drawing), next to a 1x Restless / Yorick / Ghost.');
+{
+  const by = 1335; baseline(30, 560, by);
+  for (let i = 0; i < 8; i++) drawNunWithGun(ctx, 80 + i * 62, by, 1, (i / 8) * TAU, 0);
+  label('1x, actual size', 40, by + 6);
+  // honest zoom: render at 1x into an offscreen, then blit 4x with smoothing off
+  const off = document.createElement('canvas'); off.width = 200; off.height = 36;
+  const o = off.getContext('2d');
+  o.fillStyle = P.floor; o.fillRect(0, 0, 200, 36);
+  drawNunWithGun(o, 24, 34, 1, 0.45, 0);
+  drawNunWithGun(o, 70, 34, 1, Math.PI + 0.6, 0);
+  drawNunWithGun(o, 112, 34, 1, -Math.PI / 2, 0);
+  drawRestless(o, 148, 34, 1, 0);
+  drawYorick(o, 172, 34, 1, 1);
+  drawGhost(o, 192, 34, 1, 0);
+  ctx.save(); ctx.imageSmoothingEnabled = false; ctx.drawImage(off, 580, 1216, 800, 144); ctx.restore();
+  label('1x pixels × 4 (nearest neighbour)', 580, by + 6);
+}
+</script>
+
+<!--
+============================================================================
+NOTES FOR THE CODER — lifting these into the SPRITES section
+============================================================================
+
+PALETTE (design doc §11) plus additions. Lift `P` as-is:
+
+  floor #1b1f3a · floorLine #151830 · border #5a6078 · amber #ffb347
+  green #7bd389 · greenShade #4f9a5c · bone #f4f0e6 · ghost #8fe3ff
+  muzzle #fff3c4 · cream #f4f0e6 · purple #7b3fa0 · gold #ffd166 · brass #d9a441
+
+  Additions (needed to draw anything; all are tones OF the palette, not new hues):
+  ink #07070d          the 2 px outline on every body
+  habit #262633        the nun's habit is CHARCOAL, not #000 — pure black merges with the #1b1f3a floor
+  habitHi #3c3c4e      nun highlight tone (light from upper-left everywhere)
+  skin #f2c29b, eye #14141c, shoe #111118
+  gunDark #2b2e3a, gunHi #4d515f, stock #6b4226, stockHi #8a5a34, pump #8a8f9c
+  boneShade #cfc9ba    Yorick's one shade tone
+  greyGreen #8a9c8c, greyGreenShade #5d6f60    Gravedigger (muted, so he is not "a big Restless")
+  purpleShade #56297a, paleFace #d8c3e0          Claudius
+  ghostShade #5fb5d6
+  heart #e0475a, heartHi #ff8a96   the ONLY red in the game; it is a HUD icon, not gore (swap for gold if the Director objects)
+  brassDark #a87a2c, borderHi #7c8398, gateDark #0d0f1c
+  shadow rgba(0,0,0,0.35)
+
+PIVOT CONVENTION
+  Every body: (x, y) = FEET = bottom-centre. Shadow ellipse is drawn AT the pivot. y-sort by this y.
+  Exceptions: drawGun (x, y) = the hand pivot; drawCasing (x, y) = centre (it tumbles); drawGate (x, y) = centre of the opening on the wall's centre-line.
+  drawHeart / drawShellPip: bottom-centre.
+
+SIZES at s = 1 (logical px, feet to top)
+  Nun 31 (to veil top; 28 to the top of the coif ring) · Gun 38.5 long · Restless 26 · Yorick 15 · Gravedigger 50 (60 with the shovel) · Claudius = Gravedigger x3 (150) · Ghost 26 · Heart 11x10 · Shell pip 5x10 · Casing 5.2x2.6 · Gate 48x16.
+
+SCALE / OUTLINES
+  All functions do translate(x,y); scale(s,s) then draw in local units with lineWidth 2 for silhouettes, 1–1.5 for interior detail. So the outline scales with s. For pre-rendering: call with s = 2 into an offscreen canvas sized (w*2, h*2), blit with drawImage at (w, h). Panel A proves this looks identical to a direct 1x draw.
+  No shadowBlur, no per-frame gradients (the only gradient is the gate glow, which the game should pre-render once as a blob).
+  ctx.roundRect is used (Chrome 99+, Safari 16+, Firefox 112+). If you want to be paranoid, replace rrect's body with 4 arcs.
+
+FRAME CONVENTION
+  frame is 0 | 1. Restless / Gravedigger: legs apart / together (Gravedigger also bobs 1.2 px). Yorick: jaw shut / open (chatter). Ghost: shear left / right (waver). Flip at 8 fps while moving, hold frame 0 when idle.
+  Enemies face +x. To face left: ctx.save(); ctx.translate(x, y); ctx.scale(-1, 1); drawX(ctx, 0, 0, s, frame); ctx.restore().
+
+NUN OPTIONS  drawNun(ctx, x, y, s, o)  o = { facing: 1|-1, lean: radians, walk: 0|1, shadow: bool }
+  facing flips the whole sprite about the feet. lean rotates about the feet AFTER the flip (so lean is relative to facing); recoil lean is about -0.2 rad.
+  If you PRE-RENDER the nun, render her with o = { facing: 1, lean: 0 } and apply facing (scale(-1,1)), lean (rotate) and squash/stretch at BLIT time around the feet pivot. The o.lean parameter exists for direct draws (this page, Panel F).
+  Squash/stretch is applied OUTSIDE the function: ctx.translate(feet); ctx.scale(sx, sy); drawNunWithGun(ctx, 0, 0, s, ...). For "stretch along aim": rotate(a); scale(1.2, 0.86); rotate(-a). Panel F.
+
+GUN / BODY ORDER (drawNunWithGun shows it)
+  facing = cos(angle) < 0 ? -1 : 1
+  hand   = (x + NUN_HAND.x * s * facing,  y + NUN_HAND.y * s)      NUN_HAND = { x: 2.5, y: -14.5 }
+  sin(angle) >= 0 (aiming down or level)  → body THEN gun (gun over)
+  sin(angle) <  0 (aiming up)             → gun THEN body (gun under)
+  drawGun itself flips its local y when cos(angle) < 0 so the stock always hangs down.
+  Muzzle world position = hand + rotate((GUN_MUZZLE * s, 0), angle), GUN_MUZZLE = 28. Spawn pellets / flash / casing there; casing ejects perpendicular to aim (local +y, i.e. the stock side).
+  pumpOffset: tween 0 → 1 → 0 over the 0.45 s pump; the block slides 5 px back along the barrel.
+
+WHITE HIT-FLASH VARIANT
+  Draw the sprite to its offscreen canvas, then globalCompositeOperation = 'source-in'; fillStyle = '#fff'; fillRect(all). Panel D.
+
+GHOST
+  drawGhost sets globalAlpha 0.5 internally and draws no shadow (it floats). If you pre-render it, pre-render at alpha 1 and blit with globalAlpha 0.5 so overlapping shapes do not double up.
+
+CLAUDIUS
+  drawClaudius(ctx, x, y, 1, frame) is already 3x the Gravedigger (150 px tall). His collision radius should be ~3x the Gravedigger's; the crown top is at feet y - 166 at s = 1. Health bar goes in the HUD, not on him.
+
+WHAT CHANGED FROM §11 AND WHY
+  1. Nun height is 31 px to the veil top (28 px to the top of the coif ring). She needs to be a touch bigger than the 26 px Restless: she is the hero and the coif ring needs pixels.
+  2. Habit is charcoal #262633 with a #3c3c4e highlight instead of black: black on the indigo floor is a hole. The 2 px ink outline is the true black.
+  3. The Gravedigger carries the shovel over his shoulder (blade up behind the head) instead of at his side: it adds ~10 px to his silhouette and reads as "gravedigger" from across the arena.
+  4. Heart is red (#e0475a). The "no red" rule was about gore; a red heart is the one icon every player already knows. Gold is the fallback.
+  5. Claudius has a pale lavender face (#d8c3e0) so the crown sits on a face rather than a purple blob. One extra tone.
+-->
+</body>
+</html>
