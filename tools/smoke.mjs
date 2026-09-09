@@ -86,7 +86,7 @@ if (await G(`typeof G.startRun === 'function' && typeof G.forceCards === 'functi
 console.log('== stress: spawn 80 enemies, fire for 5s');
 if (await G(`typeof G.spawn === 'function'`)) {
   await G('G.setGod && G.setGod(true)');
-  await G('G.spawn(80)'); await sleep(300);
+  await G("G.spawn('restless', 80)"); await sleep(300);
   const stressFps = [];
   for (let i = 0; i < 25; i++) { const x = W / 2 + Math.cos(i) * 300, y = H / 2 + Math.sin(i) * 200; await b.mouseMove(x, y); await b.mouseDown(x, y); await sleep(100); await b.mouseUp(x, y); await sleep(100); const f = await G('G.fps'); if (typeof f === 'number') stressFps.push(f); }
   await shot('05-stress');
@@ -97,7 +97,7 @@ if (await G(`typeof G.spawn === 'function'`)) {
 
 console.log('== death and restart');
 await G('G.setGod && G.setGod(false)');
-await G('G.spawn && G.spawn(40)');
+await G("G.spawn('restless', 40)");
 if (await waitFor('GAMEOVER', `G.state === 'GAMEOVER'`, 30000)) {
   await sleep(600); await shot('06-gameover');
   const hi = await G('G.hiScore');
