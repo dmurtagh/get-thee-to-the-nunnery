@@ -173,7 +173,7 @@ Master chain: `sfxBus → WaveShaper(tanh) → DynamicsCompressor → masterGain
 
 ## 15. Debug API and QA
 
-`window.GAME` (plain getters): `state, wave, act, score, hp, maxHp, shells, maxShells, enemies, pellets, particleCount, fps, timeScale, god, hiScore, combo, version`, and functions `startRun(), skipToWave(n), spawn(type, n), setGod(bool), setTimeScale(x), snapshot()` (flat JSON of all of the above), `viewport` `{scale, offsetX, offsetY}` and `toScreen(x, y)`.
+`window.GAME` (plain getters): `state, wave, act, score, hp, maxHp, shells, maxShells, enemies, pellets, particleCount, fps, timeScale, god, hiScore, combo, version`, and functions `startRun(), skipToWave(n), spawn(type, n), killAll(), forceCards(), setGod(bool), setTimeScale(x), snapshot()` (flat JSON of all of the above), `viewport` `{scale, offsetX, offsetY}` and `toScreen(x, y)`.
 
 `?debug=1` or backtick toggles the overlay (fps, frame ms, entity counts) and debug keys: G god, N skip wave, K kill all, L force card screen, B spawn boss, 1–4 timeScale, F1 stress test (200 enemies + 2000 particles must stay green).
 

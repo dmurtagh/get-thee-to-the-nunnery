@@ -25,7 +25,7 @@ async function waitFor(label, expr, timeoutMs = 5000) {
   while (Date.now() - t0 < timeoutMs) { if (await G(expr)) return true; await sleep(50); }
   fail(`timeout waiting for ${label} (${expr})`); return false;
 }
-const snapshot = () => G(`JSON.stringify({state:G.state, act:G.act, score:G.score, hp:G.hp, shells:G.shells, enemies:G.enemies, pellets:G.pellets, particles:G.particles, fps:Math.round(G.fps||0)})`);
+const snapshot = () => G(`JSON.stringify({state:G.state, wave:G.wave, score:G.score, hp:G.hp, shells:G.shells, enemies:G.enemies, pellets:G.pellets, particles:G.particleCount, fps:Math.round(G.fps||0)})`);
 const checkErrors = (label) => { if (b.errors.length) { fail(`${label}: ${b.errors.length} error(s): ` + b.errors.slice(0, 3).join(' | ')); b.errors.length = 0; } else ok(`${label}: no console errors`); };
 
 console.log('== load ' + html);
@@ -69,11 +69,11 @@ if (fpsSamples.length) {
 }
 checkErrors('random play');
 
-console.log('== upgrade screen via skipToAct');
-if (await G(`typeof G.startRun === 'function' && typeof G.skipToAct === 'function'`)) {
+console.log('== upgrade screen via forceCards');
+if (await G(`typeof G.startRun === 'function' && typeof G.forceCards === 'function'`)) {
   await G('G.startRun()'); await sleep(200);
   await G('G.setGod && G.setGod(true)');
-  await G('G.skipToAct(2)');
+  await G('G.forceCards()');
   if (await waitFor('UPGRADE state', `G.state === 'UPGRADE'`, 6000)) {
     await sleep(500); await shot('04-upgrade');
     await b.click(W / 2 - 300, H / 2); await sleep(200);
@@ -81,7 +81,7 @@ if (await G(`typeof G.startRun === 'function' && typeof G.skipToAct === 'functio
     if (await G(`G.state !== 'UPGRADE'`)) ok('left upgrade screen by picking a card'); else fail('stuck on upgrade screen after click + key 1');
   }
   checkErrors('upgrade');
-} else fail('GAME.startRun / GAME.skipToAct missing');
+} else fail('GAME.startRun / GAME.forceCards missing');
 
 console.log('== stress: spawn 80 enemies, fire for 5s');
 if (await G(`typeof G.spawn === 'function'`)) {
