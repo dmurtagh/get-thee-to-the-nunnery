@@ -52,7 +52,7 @@ const PAL = {
 };
 const FONT_SERIF = 'bold Georgia, "Times New Roman", serif';
 const FONT_SANS = 'bold -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif';
-const VERSION = '0.1.0-m1';
+const VERSION = '0.2.0-m2';
 
 // ===================================================================== UTIL
 const TAU = Math.PI * 2;
@@ -158,7 +158,7 @@ const Audio = (() => {
     comp = ac.createDynamicsCompressor();
     comp.threshold.value = -14; comp.ratio.value = 10; comp.attack.value = 0.003; comp.release.value = 0.12; comp.knee.value = 6;
     shaper = ac.createWaveShaper(); shaper.curve = tanhCurve(); shaper.oversample = 'none';
-    sfx = ac.createGain(); sfx.gain.value = 1;
+    sfx = ac.createGain(); sfx.gain.value = 0.7; // headroom: only stacked blasts drive the shaper into grit
     sfx.connect(shaper); shaper.connect(comp); comp.connect(master); master.connect(ac.destination);
     musicGain = ac.createGain(); musicGain.gain.value = 0.25; musicGain.connect(comp);
     noise = ac.createBuffer(1, Math.floor(ac.sampleRate * 2), ac.sampleRate);
@@ -212,6 +212,47 @@ const Audio = (() => {
   // ---- sounds (filled in as the systems land)
   const S = {};
   S.click = () => { const v = voice('click'); if (!v) return; const t = ac.currentTime; osc({ type: 'sine', f0: 1200, f1: 900, dur: 0.05, peak: 0.25 * v, t }); noiseBurst({ t, dur: 0.012, peak: 0.2 * v, type: 'highpass', f0: 3000 }); };
+  // THE BLAST. click transient + bandpass-swept noise + sine thump + triangle body, all jittered, then the bus shaper adds grit.
+  S.blast = () => {
+    const v = voice('blast'); if (!v) return; const t = ac.currentTime, j = jit();
+    noiseBurst({ t, dur: 0.008, peak: 0.9 * v, type: 'highpass', f0: 3000, q: 0.7 });
+    noiseBurst({ t, dur: 0.26, sweep: 0.12, peak: 1.1 * v, type: 'bandpass', f0: 1800 * j, f1: 250 * j, q: 1.2 });
+    osc({ type: 'sine', f0: 120 * j, f1: 38 * j, sweep: 0.09, dur: 0.18, peak: 1.0 * v, t });
+    osc({ type: 'triangle', f0: 55 * j, f1: 45 * j, sweep: 0.1, dur: 0.14, peak: 0.5 * v, t });
+    duck(0.08, 0.35);
+  };
+  // chk-chk: two filtered clicks 90 ms apart, the second lower = "ready"
+  S.pump = () => {
+    const v = voice('pump'); if (!v) return; const t = ac.currentTime, j = jit();
+    noiseBurst({ t, dur: 0.035, peak: 0.55 * v, type: 'bandpass', f0: 2600 * j, q: 2.5 });
+    osc({ type: 'square', f0: 900 * j, f1: 600 * j, dur: 0.04, peak: 0.12 * v, t });
+    const t2 = t + 0.09;
+    noiseBurst({ t: t2, dur: 0.045, peak: 0.6 * v, type: 'bandpass', f0: 1500 * j, q: 2.5 });
+    osc({ type: 'square', f0: 620 * j, f1: 380 * j, dur: 0.06, peak: 0.14 * v, t: t2 });
+  };
+  S.shellIn = () => { const v = voice('shell'); if (!v) return; const t = ac.currentTime, j = jit(); noiseBurst({ t, dur: 0.025, peak: 0.35 * v, type: 'bandpass', f0: 1200 * j, q: 1.5 }); osc({ type: 'sine', f0: 520 * j, f1: 340 * j, dur: 0.04, peak: 0.18 * v, t }); };
+  S.tink = () => { const v = voice('tink'); if (!v) return; const t = ac.currentTime, j = jit(); osc({ type: 'sine', f0: 3200 * j, f1: 2600 * j, dur: 0.07, peak: 0.12 * v, t }); osc({ type: 'sine', f0: 4800 * j, f1: 4100 * j, dur: 0.04, peak: 0.05 * v, t }); };
+  S.hit = () => { const v = voice('hit'); if (!v) return; const t = ac.currentTime, j = jit(); osc({ type: 'square', f0: 220 * j, f1: 90 * j, dur: 0.06, peak: 0.28 * v, t }); noiseBurst({ t, dur: 0.02, peak: 0.25 * v, type: 'bandpass', f0: 1400 * j, q: 1 }); };
+  // one death sound pitched by mass: Yorick tok (0.5), Restless splat (1), Gravedigger thud (4)
+  S.death = (mass = 1) => {
+    const v = voice('death'); if (!v) return; const t = ac.currentTime, j = jit(), k = Math.sqrt(Math.max(0.25, mass));
+    noiseBurst({ t, dur: 0.16 * k, sweep: 0.12 * k, peak: 0.7 * v, type: 'lowpass', f0: (900 / k) * j, f1: (120 / k) * j, q: 1 });
+    osc({ type: 'sine', f0: (170 / k) * j, f1: (45 / k) * j, sweep: 0.1 * k, dur: 0.16 * k, peak: 0.6 * v, t });
+    if (mass < 0.75) osc({ type: 'triangle', f0: 1400 * j, f1: 500 * j, dur: 0.04, peak: 0.3 * v, t });
+  };
+  S.thud = () => { const v = voice('thud'); if (!v) return; const t = ac.currentTime, j = jit(); osc({ type: 'sine', f0: 95 * j, f1: 32 * j, sweep: 0.12, dur: 0.22, peak: 0.9 * v, t }); noiseBurst({ t, dur: 0.14, sweep: 0.1, peak: 0.5 * v, type: 'lowpass', f0: 600 * j, f1: 150 * j, q: 1 }); };
+  // dissonant organ stab + two heartbeats
+  S.hurt = () => {
+    const v = voice('hurt'); if (!v) return; const t = ac.currentTime;
+    osc({ type: 'sawtooth', f0: 220, f1: 200, sweep: 0.3, dur: 0.35, peak: 0.22 * v, t });
+    osc({ type: 'sawtooth', f0: 233, f1: 215, sweep: 0.3, dur: 0.35, peak: 0.22 * v, t });
+    osc({ type: 'sine', f0: 70, f1: 45, dur: 0.12, peak: 0.6 * v, t: t + 0.05 });
+    osc({ type: 'sine', f0: 70, f1: 45, dur: 0.12, peak: 0.5 * v, t: t + 0.3 });
+  };
+  S.bell = (mult = 1) => {
+    const v = voice('bell'); if (!v) return; const t = ac.currentTime, f = 660 * mult;
+    osc({ type: 'sine', f0: f, dur: 1.4, peak: 0.35 * v, t }); osc({ type: 'sine', f0: f * 2.01, dur: 0.9, peak: 0.15 * v, t }); osc({ type: 'sine', f0: f * 2.98, dur: 0.5, peak: 0.08 * v, t });
+  };
   function toggleMute() {
     muted = !muted; Save.data.mute = muted; Save.save();
     try { if (master) master.gain.setTargetAtTime(muted ? 0 : MASTER, ac.currentTime, 0.02); } catch (e) { /* ignore */ }
@@ -417,7 +458,7 @@ function newPlayer() {
     aim: 0, aimX: 1, aimY: 0, aimDist: 100, facing: 1,
     hp: CONFIG.HEARTS, maxHp: CONFIG.HEARTS, iframes: 0, god: false,
     stretch: 0, gunKick: 0, gunSlide: 0, walkT: 0, moving: false,
-    gun: { state: 'READY', timer: 0, shells: CONFIG.SHELLS, pumped: false },
+    gun: { state: 'READY', timer: 0, shells: CONFIG.SHELLS, pumped: false, holdBlock: true },
     stats: {
       pellets: CONFIG.PELLETS, spread: CONFIG.SPREAD_DEG, pelletSpeed: CONFIG.PELLET_SPEED, pelletLife: CONFIG.PELLET_LIFE, fullT: CONFIG.PELLET_FULL_T,
       pumpT: CONFIG.PUMP_T, shells: CONFIG.SHELLS, shellT: CONFIG.SHELL_T, recoil: 1, knock: 1, pierce: 0, bounce: 0,
@@ -445,11 +486,129 @@ function updatePlayer(dt) {
   updateGun(dt);
 }
 
-// gun state machine: READY / PUMPING / LOADING (filled in by M2)
-function updateGun(dt) { const g = G.player.gun; if (g.timer > 0) g.timer -= dt; }
-function fire() { /* M2 */ }
-function updatePellets(dt) { /* M2 */ }
-function drawPellets(c) { /* M2 */ }
+// gun state machine: READY / PUMPING / LOADING. Hold LMB to fire at pump rate; a shot is allowed mid-reload the moment one shell is in.
+function updateGun(dt) {
+  const p = G.player, g = p.gun, s = p.stats;
+  // a button already held when PLAYING begins (title click, card pick) must not fire until released once
+  if (!Input.mouse.down) g.holdBlock = false;
+  const wantFire = Input.mouse.justDown || (Input.mouse.down && !g.holdBlock);
+  if (g.state === 'READY') {
+    if (wantFire && g.shells > 0) fire();
+    else if (g.shells === 0 || (Input.pressed('KeyR') && g.shells < s.shells)) { g.state = 'LOADING'; g.timer = s.shellT; }
+  } else if (g.state === 'PUMPING') {
+    g.timer -= dt;
+    if (!g.pumped && g.timer <= s.pumpT * (1 - CONFIG.PUMP_SFX_AT)) { g.pumped = true; p.gunSlide = 5; Audio.pump(); }
+    if (g.timer <= 0) { if (g.shells === 0) { g.state = 'LOADING'; g.timer = s.shellT; } else g.state = 'READY'; }
+  } else if (g.state === 'LOADING') {
+    if (wantFire && g.shells > 0) { fire(); return; }
+    g.timer -= dt;
+    if (g.timer <= 0) {
+      g.shells++; p.gunSlide = 3; Audio.shellIn();
+      if (g.shells >= s.shells) g.state = 'READY'; else g.timer = s.shellT;
+    }
+  }
+}
+// impulse (px/s) whose total travel under per-tick friction equals px: sum of v*TICK*f^k = v*TICK/(1-f)
+const impulseFor = (px) => (px * (1 - CONFIG.FRICTION)) / CONFIG.TICK;
+function fire() {
+  const p = G.player, g = p.gun, s = p.stats;
+  g.shells--; g.state = 'PUMPING'; g.timer = s.pumpT; g.pumped = false; G.shots++;
+  const shot = { kills: 0, n: G.shots };
+  const mx = p.x + p.aimX * CONFIG.MUZZLE_OFF, my = p.y - 1 + p.aimY * CONFIG.MUZZLE_OFF;
+  const spread = (s.spread * Math.PI) / 180, n = s.pellets;
+  for (let i = 0; i < n; i++) {
+    if (G.pellets.length >= CONFIG.MAX_PELLETS) break;
+    const a = p.aim - spread / 2 + (spread * (i + Math.random())) / n; // stratified: one pellet jittered inside each slot
+    G.pellets.push({ x: mx, y: my, px: mx, py: my, vx: Math.cos(a) * s.pelletSpeed, vy: Math.sin(a) * s.pelletSpeed, age: 0, life: s.pelletLife, full: s.fullT, r: CONFIG.PELLET_R, pierce: s.pierce, bounces: s.bounce, hit: [], shot });
+  }
+  // the nun is thrown backwards: every shot is a dodge
+  const rv = impulseFor(CONFIG.RECOIL_PX) * s.recoil;
+  p.kvx -= p.aimX * rv; p.kvy -= p.aimY * rv;
+  p.stretch = 1; p.gunKick = 6;
+  FX.shake(CONFIG.SHAKE_FIRE_PX, CONFIG.SHAKE_FIRE_T);
+  FX.kick(-p.aimX * CONFIG.KICK_PX, -p.aimY * CONFIG.KICK_PX);
+  FX.flash(mx, my, p.aim);
+  FX.burst(mx, my, 3, { angle: p.aim, arc: 0.8, minSpeed: 40, maxSpeed: 90, minLife: 0.35, maxLife: 0.6, color: PAL.smoke, minSize: 4, maxSize: 7, drag: 0.9 });
+  FX.burst(mx, my, 6, { angle: p.aim, arc: 0.5, minSpeed: 300, maxSpeed: 600, minLife: 0.05, maxLife: 0.12, color: [PAL.muzzle, PAL.amber], minSize: 2, maxSize: 3, drag: 0.85 });
+  spawnCasing(p);
+  Audio.blast();
+}
+function updatePellets(dt) {
+  const B = CONFIG.BORDER, W = CONFIG.W, H = CONFIG.H, ps = G.pellets, es = G.enemies;
+  for (let i = ps.length - 1; i >= 0; i--) {
+    const b = ps[i];
+    b.px = b.x; b.py = b.y; b.x += b.vx * dt; b.y += b.vy * dt; b.age += dt;
+    let dead = b.age >= b.life;
+    if (!dead && (b.x < B || b.x > W - B || b.y < B || b.y > H - B)) {
+      if (b.bounces > 0) {
+        b.bounces--;
+        if (b.x < B || b.x > W - B) { b.vx = -b.vx; b.x = clamp(b.x, B, W - B); }
+        if (b.y < B || b.y > H - B) { b.vy = -b.vy; b.y = clamp(b.y, B, H - B); }
+      } else {
+        dead = true;
+        FX.burst(clamp(b.x, B, W - B), clamp(b.y, B, H - B), 2, { minSpeed: 30, maxSpeed: 120, minLife: 0.1, maxLife: 0.25, color: PAL.muzzle, minSize: 1.5, maxSize: 2.5 });
+      }
+    }
+    if (!dead) {
+      // swept circle: closest point on this tick's segment to each enemy, so 18 px steps never tunnel a 12 px body
+      const sx = b.x - b.px, sy = b.y - b.py, len2 = sx * sx + sy * sy || 1e-6;
+      for (let k = 0; k < es.length; k++) {
+        const e = es[k]; if (e.dead || b.hit.indexOf(e) >= 0) continue;
+        const t = clamp(((e.x - b.px) * sx + (e.y - b.py) * sy) / len2, 0, 1);
+        const cx = b.px + sx * t - e.x, cy = b.py + sy * t - e.y, rr = e.r + b.r;
+        if (cx * cx + cy * cy <= rr * rr) {
+          b.hit.push(e); hitEnemy(e, b);
+          if (b.pierce > 0) b.pierce--; else { dead = true; break; }
+        }
+      }
+    }
+    if (dead) { ps[i] = ps[ps.length - 1]; ps.pop(); }
+  }
+}
+function drawPellets(c) {
+  const ps = G.pellets; if (!ps.length) return;
+  c.save(); c.lineCap = 'round';
+  for (const b of ps) {
+    const t = b.age / b.life, len = lerp(16, 6, t);
+    const [dx, dy] = norm(b.vx, b.vy);
+    c.globalAlpha = 1 - t * 0.7; c.lineWidth = lerp(3.2, 1, t); c.strokeStyle = t < 0.5 ? PAL.muzzle : PAL.amber;
+    c.beginPath(); c.moveTo(b.x, b.y); c.lineTo(b.x - dx * len, b.y - dy * len); c.stroke();
+  }
+  c.restore();
+}
+function hitEnemy(e, b) { /* M3 */ }
+
+// brass casings: eject sideways with a fake height, one bounce and a tink, then stamped onto the floor
+function spawnCasing(p) {
+  if (G.casings.length >= CONFIG.MAX_CASINGS) { stampCasing(G.casings[0]); G.casings.shift(); }
+  const side = p.facing >= 0 ? 1 : -1;
+  const perpX = -p.aimY * side, perpY = p.aimX * side;
+  const ex = p.x + p.aimX * 8 + perpX * 4, ey = p.y - 4 + p.aimY * 8 + perpY * 4;
+  G.casings.push({ x: ex, y: ey, z: 6, vx: perpX * rand(60, 110) - p.aimX * rand(10, 40), vy: perpY * rand(60, 110) - p.aimY * rand(10, 40), vz: rand(150, 220), rot: rand(TAU), vr: rand(-14, 14), bounced: false, t: 0 });
+}
+function updateCasings(dt) {
+  const cs = G.casings;
+  for (let i = cs.length - 1; i >= 0; i--) {
+    const k = cs[i]; k.t += dt;
+    k.vz -= 700 * dt; k.z += k.vz * dt; k.x += k.vx * dt; k.y += k.vy * dt; k.rot += k.vr * dt;
+    let done = false;
+    if (k.z <= 0) {
+      if (!k.bounced) { k.bounced = true; k.z = 0; k.vz = -k.vz * 0.35; k.vx *= 0.5; k.vy *= 0.5; k.vr *= 0.5; Audio.tink(); }
+      else done = true;
+    }
+    if (done || k.t > 2.5) { stampCasing(k); cs[i] = cs[cs.length - 1]; cs.pop(); }
+  }
+}
+function drawCasing(c, k) {
+  c.save(); c.translate(k.x, k.y - k.z); c.rotate(k.rot);
+  c.fillStyle = PAL.brass; c.fillRect(-3, -1.3, 6, 2.6); c.fillStyle = PAL.red; c.fillRect(1.2, -1.3, 1.8, 2.6);
+  c.restore();
+}
+function drawCasings(c) { for (const k of G.casings) { if (k.z > 1) { c.fillStyle = 'rgba(0,0,0,0.3)'; c.fillRect(k.x - 2, k.y - 1, 4, 2); } drawCasing(c, k); } }
+function stampCasing(k) {
+  const B = CONFIG.BORDER; if (k.x < B || k.x > CONFIG.W - B || k.y < B || k.y > CONFIG.H - B) return;
+  k.z = 0; Floor.stamp((fc) => drawCasing(fc, k));
+}
 
 // enemies (filled in by M3)
 const ENEMY_DEFS = {};
@@ -459,8 +618,6 @@ function updateEnemies(dt) { /* M3 */ }
 function drawEnemy(c, e) { /* M3 */ }
 function killEnemy(e, shot) { /* M3 */ }
 function hurt(src) { /* M3 */ }
-function updateCasings(dt) { /* M3 */ }
-function drawCasings(c) { /* M3 */ }
 
 // floating texts
 function addText(str, x, y, opts = {}) {
@@ -542,8 +699,8 @@ function drawWorld(c) {
 }
 function drawReticle(c) {
   const p = G.player, m = Input.mouse;
-  const r = clamp(p.aimDist * Math.tan((CONFIG.SPREAD_DEG / 2) * Math.PI / 180), 6, 60);
-  const killRange = CONFIG.PELLET_SPEED * CONFIG.PELLET_FULL_T + 12;
+  const r = clamp(p.aimDist * Math.tan((p.stats.spread / 2) * Math.PI / 180), 6, 60);
+  const killRange = p.stats.pelletSpeed * p.stats.fullT + 12;
   let hot = false;
   for (const e of G.enemies) { const d = Math.hypot(e.x - p.x, e.y - p.y); if (d < killRange + e.r) { hot = true; break; } }
   c.save();
@@ -590,7 +747,7 @@ STATES.TITLE = {
 };
 
 STATES.PLAYING = {
-  enter() { Input.endTick(); },
+  enter() { Input.endTick(); G.player.gun.holdBlock = true; },
   update(dt) {
     if (Input.pressed('Escape') || Input.pressed('KeyP')) { setState('PAUSED'); return; }
     G.t += dt;
