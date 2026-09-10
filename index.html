@@ -47,7 +47,7 @@ const CONFIG = {
   CALLOUT_ALAS: 3, CALLOUT_ZOUNDS: 5, CALLOUT_YORICK: 7, CALLOUT_LIFE: 1.0, CALLOUT_INSET: 40, SHOT_RESOLVE_T: 0.6,
   // budgets
   PARTICLES: 500, MAX_ENEMIES: 80, MAX_PELLETS: 120, MAX_TEXTS: 20, MAX_CASINGS: 40, MAX_PICKUPS: 30,
-  CHUNKS: 8, CONFETTI: 10, CHUNK_DRAG: 0.94, CONFETTI_DRAG: 0.96, DECAL_ALPHA: 0.35, CASING_STAMP_ALPHA: 0.4,
+  CHUNKS: 8, CONFETTI: 10, CHUNK_DRAG: 0.94, CONFETTI_DRAG: 0.96, DECAL_ALPHA: 0.35, CASING_STAMP_ALPHA: 0.4, DECALS_PER_FRAME: 16,
   // audio bus + the blast envelope (the one sound that has to be the loudest thing in the game)
   COMP_THRESH: -8, COMP_RATIO: 4, COMP_ATTACK: 0.003, COMP_RELEASE: 0.12, COMP_KNEE: 6,
   BLAST_NOISE_DUR: 0.30, BLAST_NOISE_SWEEP: 0.16, BLAST_SINE_DUR: 0.30, BLAST_SINE_PEAK: 1.3, BLAST_TRI_DUR: 0.26,
@@ -216,7 +216,7 @@ const Save = (() => {
   function load() {
     try {
       const raw = localStorage.getItem(KEY);
-      if (raw) { const o = JSON.parse(raw); const d = def(); for (const k in d) if (o && typeof o[k] === typeof d[k]) d[k] = o[k]; data = d; }
+      if (raw) { const o = JSON.parse(raw); const d = def(); for (const k in d) if (o && typeof o[k] === typeof d[k] && Array.isArray(o[k]) === Array.isArray(d[k])) d[k] = o[k]; data = d; }
     } catch (e) { data = def(); }
     return data;
   }
@@ -487,7 +487,7 @@ const Music = (() => {
     if (down && step === 0) note(hz(ch[0] + (CONFIG.MUSIC_ARP_OCT - 1) * 12), t);
   }
   function set(m, waveN) {
-    if (waveN) wave = waveN;
+    if (waveN != null) wave = waveN;
     if (m === mode) return;
     mode = m;
     if (m === 'off' && ac) offAt = ac.currentTime;
@@ -1119,7 +1119,8 @@ const FX = (() => {
 const Floor = (() => {
   const S = 2; let cv, fc;
   function build() {
-    cv = makeCanvas(CONFIG.W * S, CONFIG.H * S); fc = cv.getContext('2d'); fc.setTransform(S, 0, 0, S, 0, 0);
+    if (!cv) { cv = makeCanvas(CONFIG.W * S, CONFIG.H * S); fc = cv.getContext('2d'); }   // 8 MB backing store: allocate once, repaint on every retry
+    fc.setTransform(S, 0, 0, S, 0, 0); fc.globalAlpha = 1;
     fc.fillStyle = PAL.floor; fc.fillRect(0, 0, CONFIG.W, CONFIG.H);
     fc.strokeStyle = PAL.stone; fc.lineWidth = 2;
     const cw = 48, ch = 32;
@@ -1235,7 +1236,7 @@ function fire() {
     const a = p.aim - spread / 2 + (spread * (i + Math.random())) / n; // stratified: one pellet jittered inside each slot
     const sp = s.pelletSpeed * (1 + rand(-CONFIG.PELLET_SPEED_JITTER, CONFIG.PELLET_SPEED_JITTER)); // a spray, not a comb of tracers
     const age0 = CONFIG.MUZZLE_OFF / sp; // life and damage falloff are measured from the nun, not the muzzle, so the range numbers hold
-    G.pellets.push({ x: mx, y: my, px: mx, py: my, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, age: age0, life: s.pelletLife, full: s.fullT, r: CONFIG.PELLET_R, pierce: s.pierce, bounces: s.bounce, hit: [], shot });
+    G.pellets.push({ x: mx, y: my, px: p.x, py: p.y - 1, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, age: age0, life: s.pelletLife, full: s.fullT, r: CONFIG.PELLET_R, pierce: s.pierce, bounces: s.bounce, hit: [], shot });
   }
   // the nun is thrown backwards: every shot is a dodge
   const rv = impulseFor(CONFIG.RECOIL_PX) * s.recoil;
@@ -1253,7 +1254,7 @@ function updatePellets(dt) {
   const B = CONFIG.BORDER, W = CONFIG.W, H = CONFIG.H, ps = G.pellets, es = G.enemies;
   for (let i = ps.length - 1; i >= 0; i--) {
     const b = ps[i];
-    b.px = b.x; b.py = b.y; b.x += b.vx * dt; b.y += b.vy * dt; b.age += dt;
+    b.x += b.vx * dt; b.y += b.vy * dt; b.age += dt;   // px/py hold the PREVIOUS position: the first sweep runs from the nun, not the muzzle
     let dead = b.age >= b.life;
     if (!dead && (b.x < B || b.x > W - B || b.y < B || b.y > H - B)) {
       if (b.bounces > 0) {
@@ -1278,6 +1279,7 @@ function updatePellets(dt) {
         }
       }
     }
+    b.px = b.x; b.py = b.y;   // seed the next tick's sweep from where this one ended
     if (dead) { ps[i] = ps[ps.length - 1]; ps.pop(); }
   }
 }
@@ -1488,7 +1490,11 @@ function wallSplat(e) {
   Audio.thud();
   if (e.hp <= 0) killEnemy(e, e.lastShot);
 }
+// clipped stamps are the one expensive thing a mass death can do 80 times at once: spend at most DECALS_PER_FRAME of them
+let decalBudget = 0;
 function splatDecal(x, y, color, r, dir, speed) {
+  if (decalBudget <= 0) return;
+  decalBudget--;
   Floor.stamp((fc) => {
     fc.globalAlpha = CONFIG.DECAL_ALPHA; fc.fillStyle = color;
     const stretch = 1 + Math.min(1.5, speed / 400);
@@ -1605,7 +1611,7 @@ const comboMult = () => Math.min(1 + CONFIG.COMBO_STEP * G.chain, CONFIG.COMBO_M
 // ===================================================================== WAVES
 function waveName(n) {
   if (n <= 0) return '';
-  if (n > 10) return 'ENCORE ' + roman(n - 10);
+  if (n > CONFIG.BOSS_WAVE) return 'ENCORE ' + roman(n - CONFIG.BOSS_WAVE);
   return 'ACT ' + roman(Math.ceil(n / 2)) + ' · SCENE ' + roman(((n - 1) % 2) + 1);
 }
 function roman(n) { const R = ['', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII', 'XIII', 'XIV', 'XV']; return R[n] || String(n); }
@@ -1794,7 +1800,7 @@ const BLESSINGS = [
     apply(p) { p.stats.pumpT *= CONFIG.VESPERS_MULT; p.stats.shellT *= CONFIG.VESPERS_MULT; } },
   { id: 'wrath', name: 'WRATH', line: 'Recoil throws you further. Fly.', max: 1, color: PAL.purple,
     apply(p) { p.stats.recoil *= CONFIG.WRATH_RECOIL; } },
-  { id: 'grace', name: 'GRACE', line: 'One more heart. Fully healed.', max: Infinity, color: PAL.red,
+  { id: 'grace', name: 'GRACE', line: 'One more heart. Fully healed.', capLine: 'Every wound closed. Fully healed.', max: Infinity, color: PAL.red,
     apply(p) { p.maxHp = Math.min(CONFIG.MAX_HEARTS, p.maxHp + CONFIG.GRACE_HEARTS); p.hp = p.maxHp; } },
   { id: 'oldtestament', name: 'OLD TESTAMENT', line: 'Pellets pass through one body.', max: 1, color: PAL.bone,
     apply(p) { p.stats.pierce += CONFIG.OLDTEST_PIERCE; } },
@@ -1809,7 +1815,9 @@ const BLESSINGS = [
 const LOCKED_BLESSINGS = ['wrath', 'ricochet', 'thunderclap'];
 const UNLOCK_NAMES = { wrath: 'WRATH', ricochet: 'RICOCHET PSALM', thunderclap: 'THUNDERCLAP', hardhabit: 'HARD HABIT' };
 function blessingById(id) { for (const b of BLESSINGS) if (b.id === id) return b; return null; }
-function unlocked(id) { const u = Save.data.unlocks; return !!u && u.indexOf(id) >= 0; }
+// a card whose headline effect is already capped shows its fallback line, so a drained pool never promises a heart it cannot give
+function cardLine(b) { return b.capLine && G.player.maxHp >= CONFIG.MAX_HEARTS ? b.capLine : b.line; }
+function unlocked(id) { const u = Save.data.unlocks; return Array.isArray(u) && u.indexOf(id) >= 0; }
 function unlockedPool() { return BLESSINGS.filter((b) => LOCKED_BLESSINGS.indexOf(b.id) < 0 || unlocked(b.id)); }
 function blessingStacks(id) { return (G.picks && G.picks[id]) || 0; }
 function eligibleBlessings() { return unlockedPool().filter((b) => blessingStacks(b.id) < b.max); }
@@ -1852,7 +1860,12 @@ function cardRect(i) {
   return { x: x0 + i * (cw + gap), y: CONFIG.CARD_Y, w: cw, h: CONFIG.CARD_H };
 }
 function cardAt(mx, my) {
-  for (let i = 0; i < G.cards.length; i++) { const r = cardRect(i); if (mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h) return i; }
+  // the hovered card's art sits CARD_LIFT higher, so its box grows upwards by the lift and keeps its old
+  // bottom edge: the union is sticky, where a box that only moved would flicker the hover 60 times a second
+  for (let i = 0; i < G.cards.length; i++) {
+    const r = cardRect(i), lift = i === G.cardHover ? CONFIG.CARD_LIFT : 0;
+    if (mx >= r.x && mx <= r.x + r.w && my >= r.y - lift && my <= r.y + r.h) return i;
+  }
   return -1;
 }
 function drawCards(c, cards, hoverIndex, t) {
@@ -1872,7 +1885,7 @@ function drawCards(c, cards, hoverIndex, t) {
     c.fillStyle = 'rgba(7,7,13,0.8)'; c.fillRect(sx - 4.5, sy - 22, 9, 42); c.fillRect(sx - 14, sy - 11, 28, 8);
     const nf = FSANS(19), nl = uiWrap(c, b.name, nf, cw - 34);
     nl.forEach((ln, k) => uiText(c, ln, sx, y + 135 + k * 24 - (nl.length - 1) * 6, nf, PAL.cream, 'center', { spacing: 1.5 }));
-    const lf = FSANS(15, true), ll = uiWrap(c, b.line, lf, cw - 44);
+    const lf = FSANS(15, true), ll = uiWrap(c, cardLine(b), lf, cw - 44);
     ll.forEach((ln, k) => uiText(c, ln, sx, y + 196 + k * 21, lf, rgba(PAL.cream, 0.85), 'center'));
     // stack pips: only for the stackable cards
     if (b.max > 1 && isFinite(b.max)) {
@@ -2414,11 +2427,17 @@ function safeUpdate(dt) {
   }
   Input.endTick();
 }
+let drawFails = 0;
 function draw() {
   const s = View.scale * View.dpr;
   ctx.setTransform(s, 0, 0, s, 0, 0);
   ctx.fillStyle = PAL.floor; ctx.fillRect(0, 0, CONFIG.W, CONFIG.H);
-  try { STATES[G.state].draw(ctx); } catch (err) { console.error('draw failed', err); }
+  try { STATES[G.state].draw(ctx); drawFails = 0; }
+  catch (err) {
+    if (drawFails++ === 0) console.error('draw failed', err);   // log the streak once, not every frame
+    try { ctx.restore(); } catch (e2) { /* the throw may have left a save() open */ }
+    try { if (G.state !== 'GAMEOVER') setState('GAMEOVER'); } catch (e2) { /* nothing left to do */ }
+  }
   drawDebug(ctx);
 }
 let last = 0, acc = 0;
@@ -2432,7 +2451,8 @@ function frame(now) {
   Perf._frames++; Perf._acc += dt; if (Perf._acc >= 0.5) { Perf.fps = Perf._frames / Perf._acc; Perf._frames = 0; Perf._acc = 0; }
   // render-time systems: shake, kick, flashes, slow-mo timer, the music scheduler
   FX.tickRender(dt);
-  Music.set(G.state === 'PLAYING' ? 'play' : G.state === 'TITLE' || G.state === 'UPGRADE' ? 'drone' : 'off', G.wave);
+  decalBudget = CONFIG.DECALS_PER_FRAME;
+  Music.set(G.state === 'PLAYING' ? 'play' : G.state === 'TITLE' || G.state === 'UPGRADE' ? 'drone' : 'off', G.wave || 1);
   Music.update();
   if (G.slowmoT > 0) { G.slowmoT -= dt; if (G.slowmoT <= 0) G.timeScale = G.baseTimeScale; }
   // wave-end and boss-death slow-mo run on render time, so 0.4 s means 0.4 s no matter how slow the sim is
