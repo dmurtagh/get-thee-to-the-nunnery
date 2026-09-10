@@ -38,7 +38,9 @@ const CONFIG = {
   SHAKE_FIRE_PX: 9, SHAKE_FIRE_T: 0.12, KICK_PX: 8, KICK_DECAY: 14,
   HITSTOP_KILL: 3, HITSTOP_MULTI: 4, HITSTOP_CAP: 5, MULTI_KILLS: 3,
   // score
-  COMBO_T: 1.5, COMBO_STEP: 0.1, COMBO_MAX: 5,
+  COMBO_T: 1.5, COMBO_STEP: 0.1, COMBO_MAX: 5, MULT_POP_T: 0.25,
+  // multikill callouts (spec §8): one floating line per shot, resolved once the shot's pellets are spent
+  CALLOUT_ALAS: 3, CALLOUT_ZOUNDS: 5, CALLOUT_YORICK: 8, CALLOUT_LIFE: 1.0, CALLOUT_INSET: 40, SHOT_RESOLVE_T: 0.6,
   // budgets
   PARTICLES: 500, MAX_ENEMIES: 80, MAX_PELLETS: 120, MAX_TEXTS: 20, MAX_CASINGS: 40, MAX_PICKUPS: 30,
   CHUNKS: 8, CONFETTI: 10, CHUNK_DRAG: 0.94, CONFETTI_DRAG: 0.96, DECAL_ALPHA: 0.35,
@@ -52,8 +54,8 @@ const CONFIG = {
   COST_RESTLESS: 1, COST_YORICK_PACK: 3, COST_GRAVEDIGGER: 6, COST_GHOST: 5,
   WAVE_YORICK: 3, WAVE_GRAVEDIGGER: 5, WAVE_GHOST: 6,
   PACK_MIN: 8, PACK_MAX: 12, PACK_SPREAD: 26, WOBBLE_AMP: 0.55, WOBBLE_FREQ: 6,
-  WAVE_END_SLOWMO: 0.3, WAVE_END_T: 0.4, WAVE_CARD_T: 1.4, WAVE_BONUS: 100, ENCORE_STEP: 0.1,
-  BOSS_WIN_SLOWMO: 0.22, BOSS_WIN_T: 1.2, BOSS_BAR_W: 420, RETRY_LOCK: 0.25,
+  WAVE_END_SLOWMO: 0.3, WAVE_END_T: 0.4, WAVE_CARD_T: 2.0, WAVE_BONUS: 100, ENCORE_STEP: 0.1,
+  BOSS_WIN_SLOWMO: 0.22, BOSS_WIN_T: 1.2, RETRY_LOCK: 0.25,
   // blessings (spec §7): every coefficient the ten cards move
   BUCKSHOT_PELLETS: 3, SAWNOFF_SPREAD: 12, SAWNOFF_KNOCK: 1.5, SAWNOFF_LIFE: 0.8,
   HAILMARY_SHELLS: 2, VESPERS_MULT: 0.75, WRATH_RECOIL: 1.6, GRACE_HEARTS: 1,
@@ -62,7 +64,7 @@ const CONFIG = {
   CARDS_N: 3, CARD_W: 224, CARD_H: 286, CARD_GAP: 36, CARD_Y: 118, CARD_LIFT: 10,
   // unlocks and HARD HABIT (spec §8)
   UNLOCK_WAVE: 5, UNLOCK_KILLS: 500, UNLOCK_RUNS: 3, UNLOCK_WINS: 1,
-  HARD_WAVE: 4, HARD_HEARTS: 2, HARD_MULT: 1.5, HARD_PILL_W: 214, HARD_PILL_H: 34, HARD_PILL_Y: 402,
+  HARD_WAVE: 4, HARD_HEARTS: 2, HARD_MULT: 1.5, HARD_PILL_W: 214, HARD_PILL_H: 34, HARD_PILL_X: 66, HARD_PILL_Y: 388,
   // pickups
   HEART_HEAL: 1, HEART_R: 10, HEART_LIFE: 14, HEART_BLINK: 3,
   // debug drip spawner (GAME.debugSpawn only; the wave system owns the real spawns)
@@ -70,10 +72,20 @@ const CONFIG = {
 };
 
 const PAL = {
+  // spec §11 verbatim
   floor: '#1b1f3a', stone: '#151830', border: '#5a6078', amber: '#ffb347',
   green: '#7bd389', greenShade: '#4f9a5c', bone: '#f4f0e6', cyan: '#8fe3ff',
   muzzle: '#fff3c4', cream: '#f4f0e6', purple: '#7b3fa0', gold: '#ffd166', brass: '#d9a441',
-  black: '#111118', outline: '#0b0b12', skin: '#f1c9a5', red: '#c0392b', smoke: '#8a8fa8',
+  skin: '#f2c29b', red: '#c0392b', smoke: '#8a8fa8',
+  // the Designer's additions (docs/jam/art/sprites-scratch.html): all tones OF the palette, no new hues
+  ink: '#07070d',            // the 2 px outline on every body
+  habit: '#262633',          // the habit is CHARCOAL: pure black is a hole in the indigo floor
+  habitHi: '#3c3c4e', eye: '#14141c', shoe: '#111118',
+  gunDark: '#2b2e3a', gunHi: '#4d515f', stock: '#6b4226', stockHi: '#8a5a34', pump: '#8a8f9c',
+  boneShade: '#cfc9ba', greyGreen: '#8a9c8c', greyGreenShade: '#5d6f60',
+  purpleShade: '#56297a', paleFace: '#d8c3e0', ghost: '#8fe3ff', ghostShade: '#5fb5d6',
+  heart: '#e0475a', heartHi: '#ff8a96', brassDark: '#a87a2c', borderHi: '#7c8398', gateDark: '#0d0f1c',
+  shadow: 'rgba(0,0,0,0.35)',
 };
 const FAM_SERIF = 'Georgia, "Times New Roman", serif';
 const FAM_SANS = '-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif';
@@ -97,34 +109,50 @@ function text(c, str, x, y, px, color, align = 'center', serif = false, base = '
   c.font = font(px, serif); c.fillStyle = color; c.textAlign = align; c.textBaseline = base; c.fillText(str, x, y);
 }
 function makeCanvas(w, h) { const cv = document.createElement('canvas'); cv.width = w; cv.height = h; return cv; }
+// render-time clock: advances every frame in every state, so pulses and torch flicker never stop
+let RT = 0;
+const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+const easeOutBack = (x) => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+const easeOutCubic = (x) => 1 - Math.pow(1 - x, 3);
+const pulse = (t, hz, lo, hi) => lo + (hi - lo) * (0.5 + 0.5 * Math.sin(t * hz * TAU));
 
 // ---- UI primitives (lifted from the Designer's ui-scratch.html: rrect/ell/rgba + letter-spaced text)
 const rgba = (hex, a) => { const n = parseInt(hex.slice(1), 16); return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')'; };
+// rounded-rect path with an arc-based fallback for engines without ctx.roundRect
+function rpath(c, x, y, w, h, r) {
+  if (c.roundRect) { c.beginPath(); c.roundRect(x, y, w, h, r); return; }
+  const k = Math.min(r, Math.abs(w) / 2, Math.abs(h) / 2);
+  c.beginPath(); c.moveTo(x + k, y);
+  c.arcTo(x + w, y, x + w, y + h, k); c.arcTo(x + w, y + h, x, y + h, k);
+  c.arcTo(x, y + h, x, y, k); c.arcTo(x, y, x + w, y, k); c.closePath();
+}
 function rrect(c, x, y, w, h, r, fill, stroke, lw) {
-  c.beginPath(); c.roundRect(x, y, w, h, r);
+  rpath(c, x, y, w, h, r);
   if (fill) { c.fillStyle = fill; c.fill(); }
   if (stroke) { c.lineWidth = lw || 2; c.strokeStyle = stroke; c.stroke(); }
 }
-function ell(c, x, y, rx, ry, fill, stroke, lw) {
-  c.beginPath(); c.ellipse(x, y, rx, ry, 0, 0, TAU);
+function ell(c, x, y, rx, ry, fill, stroke, lw, rot) {
+  c.beginPath(); c.ellipse(x, y, rx, ry, rot || 0, 0, TAU);
   if (fill) { c.fillStyle = fill; c.fill(); }
   if (stroke) { c.lineWidth = lw || 2; c.strokeStyle = stroke; c.stroke(); }
 }
 // letter spacing is done by hand (per-glyph fillText) so it works everywhere; uiMeasure matches it
 function uiMeasure(c, str, f, spacing) { c.font = f; return c.measureText(str).width + (spacing || 0) * Math.max(0, str.length - 1); }
-// opts: { spacing, shadow (px offset, drawn in ink first), baseline }
+// opts: { spacing, shadow (px offset, drawn in ink first), stroke (px, ink under the fill), baseline }
 function uiText(c, str, x, y, f, color, align, opts) {
   opts = opts || {};
   const sp = opts.spacing || 0, w = uiMeasure(c, str, f, sp);
   const sx = align === 'center' ? x - w / 2 : align === 'right' ? x - w : x;
   c.font = f; c.textAlign = 'left'; c.textBaseline = opts.baseline || 'alphabetic';
-  const run = (d, col) => {
-    c.fillStyle = col; let cx = sx + d;
-    if (!sp) { c.fillText(str, cx, y + d); return; }
-    for (const ch of str) { c.fillText(ch, cx, y + d); cx += c.measureText(ch).width + sp; }
+  const run = (d, mode, col) => {
+    if (mode === 'fill') c.fillStyle = col; else { c.strokeStyle = col; c.lineWidth = opts.stroke; c.lineJoin = 'round'; }
+    let cx = sx + d;
+    if (!sp) { mode === 'fill' ? c.fillText(str, cx, y + d) : c.strokeText(str, cx, y + d); return; }
+    for (const ch of str) { mode === 'fill' ? c.fillText(ch, cx, y + d) : c.strokeText(ch, cx, y + d); cx += c.measureText(ch).width + sp; }
   };
-  if (opts.shadow) run(opts.shadow, opts.shadowColor || PAL.outline);
-  run(0, color);
+  if (opts.shadow) run(opts.shadow, 'fill', opts.shadowColor || PAL.ink);
+  if (opts.stroke) run(0, 'stroke', opts.strokeColor || PAL.ink);
+  run(0, 'fill', color);
   return w;
 }
 function uiWrap(c, str, f, maxW) {
@@ -139,6 +167,8 @@ function keycap(c, x, y, ch, size) {
   rrect(c, x, y, size, size, 4, '#22233a', rgba(PAL.cream, 0.55), 1.5);
   uiText(c, ch, x + size / 2, y + size * 0.72, FSANS(Math.round(size * 0.55)), PAL.cream, 'center');
 }
+function dim(c, a) { c.fillStyle = 'rgba(7,7,13,' + a + ')'; c.fillRect(0, 0, CONFIG.W, CONFIG.H); }
+function rule(c, x, y, w, color) { c.fillStyle = color || PAL.amber; c.fillRect(x, y, w, 2); }
 
 // canvas + letterbox viewport
 const canvas = document.getElementById('c');
@@ -348,59 +378,484 @@ const Audio = (() => {
 })();
 
 // ===================================================================== SPRITES
-// Placeholder procedural shapes. Task 6 replaces these with the Designer's recipes, pre-rendered at boot.
-function drawShadow(c, x, y, rx, ry) { c.fillStyle = 'rgba(0,0,0,0.35)'; c.beginPath(); c.ellipse(x, y, rx, ry, 0, 0, TAU); c.fill(); }
+// The Designer's procedural recipes (docs/jam/art/sprites-scratch.html), lifted.
+// Pivot: (x, y) is the FEET (bottom-centre) unless noted; s = scale, 1 = in-game size.
+// All geometry is in local units, so ctx.scale(s) scales the 2 px ink outline too.
+// These numbers are ART, not tuning: they live here beside the recipes, never in CONFIG.
 
-function drawNun(c, p) {
-  const x = p.x, y = p.y, feetY = y + 14;
-  drawShadow(c, x, feetY, 13, 4);
+// the ground shadow is baked out of the pre-rendered bodies (a white silhouette must not
+// include it, and squash/stretch must not scale it), so the world draws it at blit time
+let SPR_SHADOWS = true;
+function shadow(c, x, y, rx, ry) {
+  if (!SPR_SHADOWS) return;
+  c.fillStyle = PAL.shadow; c.beginPath(); c.ellipse(x, y, rx, ry, 0, 0, TAU); c.fill();
+}
+function drawShadow(c, x, y, rx, ry) { c.fillStyle = PAL.shadow; c.beginPath(); c.ellipse(x, y, rx, ry, 0, 0, TAU); c.fill(); }
+// outlined thick line (limbs): ink underlay then colour
+function limb(c, x1, y1, x2, y2, w, colour) {
+  c.lineCap = 'round';
+  c.lineWidth = w + 3; c.strokeStyle = PAL.ink; c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke();
+  c.lineWidth = w; c.strokeStyle = colour; c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke();
+  c.lineCap = 'butt';
+}
+
+// ---------------------------------------------------------------- THE NUN
+// o = { facing: 1|-1, lean: radians around the feet, walk: 0|1, shadow: bool }
+// Height ~31 px at s=1 (feet to veil top). Hand pivot for the gun: NUN_HAND.
+const NUN_HAND = { x: 2.5, y: -14.5 };
+function drawNun(c, x, y, s, o) {
+  o = o || {};
+  const facing = o.facing || 1, walk = o.walk || 0;
   c.save();
-  c.translate(x, feetY);
-  // lean into recoil, squash/stretch on fire
-  const lean = clamp(p.kvx / 900, -0.35, 0.35);
-  c.rotate(lean);
-  const st = p.stretch || 0;
-  c.scale((1 + st * 0.18) * (p.facing < 0 ? -1 : 1), 1 - st * 0.14);
-  c.translate(-x, -feetY);
-  c.lineWidth = 2; c.strokeStyle = PAL.outline;
-  // habit: bell shape
-  c.fillStyle = PAL.black;
-  c.beginPath();
-  c.moveTo(x - 6, y - 4); c.lineTo(x + 6, y - 4);
-  c.quadraticCurveTo(x + 10, y + 6, x + 11, feetY);
-  c.lineTo(x - 11, feetY);
-  c.quadraticCurveTo(x - 10, y + 6, x - 6, y - 4);
-  c.closePath(); c.fill(); c.stroke();
-  // scapular strip + cross
-  c.fillStyle = PAL.bone; c.fillRect(x - 2.5, y - 3, 5, 12);
-  c.fillStyle = PAL.gold; c.fillRect(x - 0.9, y + 1, 1.8, 6); c.fillRect(x - 2.5, y + 2.6, 5, 1.8);
-  // veil behind head
-  c.fillStyle = PAL.black; c.beginPath(); c.ellipse(x, y - 8, 10.5, 11, 0, 0, TAU); c.fill(); c.stroke();
-  // coif ring (the silhouette) then face
-  c.fillStyle = PAL.bone; c.beginPath(); c.arc(x, y - 9, 8, 0, TAU); c.fill(); c.stroke();
-  c.fillStyle = PAL.skin; c.beginPath(); c.arc(x, y - 8.5, 5.2, 0, TAU); c.fill();
-  c.fillStyle = PAL.outline; c.fillRect(x - 3, y - 10, 1.6, 2); c.fillRect(x + 1.4, y - 10, 1.6, 2);
+  c.translate(x, y);
+  c.scale(s * facing, s);
+  if (o.shadow !== false) shadow(c, 0, 0, 9, 3);
+  c.rotate(o.lean || 0);
+  c.lineJoin = 'round';
   // shoes
-  c.fillStyle = PAL.outline; c.fillRect(x - 7, feetY - 2, 5, 2.5); c.fillRect(x + 2, feetY - 2, 5, 2.5);
+  const step = walk ? 1.5 : 0;
+  rrect(c, -7 + step, -3.2, 5.5, 3.2, 1.2, PAL.shoe, PAL.ink, 1);
+  rrect(c, 1.5 - step, -3.2, 5.5, 3.2, 1.2, PAL.shoe, PAL.ink, 1);
+  // veil (behind everything): cap over the head, trailing to the shoulders
+  c.beginPath();
+  c.moveTo(-9, -12);
+  c.quadraticCurveTo(-10.2, -22, -7.6, -26.8);
+  c.quadraticCurveTo(-3.6, -31.4, 0, -31.4);
+  c.quadraticCurveTo(3.6, -31.4, 7.6, -26.8);
+  c.quadraticCurveTo(10.2, -22, 9, -12);
+  c.quadraticCurveTo(0, -10, -9, -12);
+  c.closePath();
+  c.fillStyle = PAL.habit; c.fill(); c.lineWidth = 2; c.strokeStyle = PAL.ink; c.stroke();
+  // habit: bell
+  c.beginPath();
+  c.moveTo(-5.2, -18.5); c.lineTo(5.2, -18.5);
+  c.quadraticCurveTo(9, -11, 9.8, -1.5);
+  c.quadraticCurveTo(0, 0.6, -9.8, -1.5);
+  c.quadraticCurveTo(-9, -11, -5.2, -18.5);
+  c.closePath();
+  c.fillStyle = PAL.habit; c.fill(); c.lineWidth = 2; c.strokeStyle = PAL.ink; c.stroke();
+  // habit highlight (light from upper-left)
+  c.beginPath();
+  c.moveTo(-4.4, -17.5);
+  c.quadraticCurveTo(-7.6, -11, -8.2, -2.8);
+  c.lineTo(-5.6, -2.6);
+  c.quadraticCurveTo(-5.6, -11, -2.4, -17.5);
+  c.closePath();
+  c.fillStyle = PAL.habitHi; c.fill();
+  // scapular strip
+  rrect(c, -2.1, -17.8, 4.2, 15.3, 0.6, PAL.bone, PAL.ink, 1);
+  // gold cross
+  c.fillStyle = PAL.gold;
+  c.fillRect(-0.75, -15.6, 1.5, 5.2);
+  c.fillRect(-2.4, -14.2, 4.8, 1.5);
+  // coif ring (white, wider than the head) — THE nun silhouette
+  ell(c, 0, -22, 6.7, 7, PAL.bone, PAL.ink, 2);
+  // face
+  ell(c, 0, -21.6, 3.9, 4.7, PAL.skin);
+  // eyes + deadpan mouth
+  c.fillStyle = PAL.eye;
+  c.fillRect(-2.4, -22.9, 1.5, 1.7);
+  c.fillRect(0.9, -22.9, 1.5, 1.7);
+  c.fillRect(-0.8, -19.4, 1.6, 0.8);
   c.restore();
 }
 
-function drawGun(c, p) {
-  const hx = p.x + p.facing * 2, hy = p.y - 1;
+// ---------------------------------------------------------------- THE SHOTGUN
+// (x, y) = pivot at the nun's hand. angle in radians. pumpOffset 0..1 racks the block 5 px back.
+// Muzzle at local (GUN_MUZZLE, 0). Too long on purpose: 38.5 px at s=1 (~1.25x the nun).
+const GUN_MUZZLE = 28;
+function drawGun(c, x, y, s, angle, pumpOffset) {
   c.save();
-  c.translate(hx, hy); c.rotate(p.aim);
-  const back = -(p.gunKick || 0);
-  c.translate(back, 0);
-  c.lineWidth = 2; c.strokeStyle = PAL.outline;
+  c.translate(x, y);
+  c.scale(s, s);
+  c.rotate(angle);
+  if (Math.cos(angle) < 0) c.scale(1, -1);   // keep the stock hanging down when aiming left
+  c.lineJoin = 'round';
   // stock
-  c.fillStyle = '#6b3f23'; c.fillRect(-10, -2.5, 14, 5); c.strokeRect(-10, -2.5, 14, 5);
+  c.beginPath();
+  c.moveTo(-1, -2); c.lineTo(-1, 2.2); c.lineTo(-10, 4.6); c.lineTo(-10.5, 1); c.closePath();
+  c.fillStyle = PAL.stock; c.fill(); c.lineWidth = 2; c.strokeStyle = PAL.ink; c.stroke();
+  c.strokeStyle = PAL.stockHi; c.lineWidth = 1; c.beginPath(); c.moveTo(-2, -0.6); c.lineTo(-9, 1.6); c.stroke();
+  // rear hand at the grip
+  ell(c, 0.5, 2, 2, 1.7, PAL.skin, PAL.ink, 1);
+  // receiver
+  rrect(c, -2, -2.4, 10, 4.8, 1, PAL.gunDark, PAL.ink, 2);
   // barrel
-  c.fillStyle = '#2a2d3d'; c.fillRect(2, -2, CONFIG.GUN_LEN - 2, 4); c.strokeRect(2, -2, CONFIG.GUN_LEN - 2, 4);
-  // pump block on a dark rail: the rail is exposed as the block travels, so 5 px reads at 1x
-  const slide = p.gunSlide || 0;
-  c.fillStyle = PAL.outline; c.fillRect(6, -3.6, 18, 7.2);
-  c.fillStyle = PAL.border; c.fillRect(12 - slide, -3.9, 10, 7.8); c.strokeRect(12 - slide, -3.9, 10, 7.8);
-  c.fillStyle = PAL.outline; c.fillRect(14.5 - slide, -3.9, 1.3, 7.8); c.fillRect(18 - slide, -3.9, 1.3, 7.8);
+  rrect(c, 7, -1.6, GUN_MUZZLE - 7, 3.2, 0.6, PAL.gunDark, PAL.ink, 2);
+  c.fillStyle = PAL.gunHi; c.fillRect(8, -1.4, GUN_MUZZLE - 9, 1);
+  // muzzle cap
+  rrect(c, GUN_MUZZLE - 2, -2.1, 2.4, 4.2, 0.6, PAL.pump, PAL.ink, 1.5);
+  // pump block + front hand
+  const px = 13 - 5 * (pumpOffset || 0);
+  rrect(c, px, -2.6, 7, 5.2, 1, PAL.pump, PAL.ink, 2);
+  ell(c, px + 3.5, 1.6, 2.1, 1.7, PAL.skin, PAL.ink, 1);
+  c.restore();
+}
+
+// ---------------------------------------------------------------- THE RESTLESS (and the Ghost body)
+// frame 0|1 = 2-frame walk. ~26 px tall. Faces +x; flip with scale(-1, 1) around the feet.
+function drawRestlessBody(c, frame, pal, ghost) {
+  c.lineJoin = 'round';
+  if (!ghost) {
+    shadow(c, 0, 0, 8, 2.6);
+    // legs: apart / together
+    const xs = frame ? [-3.2, -0.2] : [-5.5, 1.5];
+    for (const lx of xs) {
+      rrect(c, lx, -7.5, 3, 7.5, 1, pal.shade, PAL.ink, 1.5);
+      rrect(c, lx - 0.5, -1.8, 4.2, 1.8, 0.6, PAL.shoe, PAL.ink, 1);
+    }
+  } else {
+    // wavy floating hem instead of legs
+    const w = frame ? 1.5 : -1.5;
+    c.beginPath();
+    c.moveTo(-6.2, -6);
+    c.quadraticCurveTo(-8, -1 + w, -5.5, 1.5);
+    c.quadraticCurveTo(-2.5, -1 - w, 0, 1.5);
+    c.quadraticCurveTo(2.5, -1 + w, 5.5, 1.5);
+    c.quadraticCurveTo(8, -1 - w, 6.2, -6);
+    c.closePath();
+    c.fillStyle = pal.shade; c.fill(); c.lineWidth = 2; c.strokeStyle = PAL.ink; c.stroke();
+  }
+  // back arm (hanging forward, zombie style)
+  limb(c, -1, -13.5, 4.5, -3.5, 3, pal.shade);
+  ell(c, 4.8, -3, 1.9, 1.7, pal.base, PAL.ink, 1);
+  // hunched torso
+  c.beginPath();
+  c.moveTo(-6, -6);
+  c.quadraticCurveTo(-8.5, -13, -3, -16.5);
+  c.lineTo(5.5, -16.5);
+  c.quadraticCurveTo(8, -11, 6, -6);
+  c.quadraticCurveTo(0, -4.5, -6, -6);
+  c.closePath();
+  c.fillStyle = pal.base; c.fill(); c.lineWidth = 2; c.strokeStyle = PAL.ink; c.stroke();
+  // shade tone on the right
+  c.beginPath();
+  c.moveTo(3, -16.2);
+  c.quadraticCurveTo(7.6, -11, 5.8, -6.3);
+  c.lineTo(2.4, -5.7);
+  c.quadraticCurveTo(4.8, -11, 3, -16.2);
+  c.closePath();
+  c.fillStyle = pal.shade; c.fill();
+  // front arm
+  limb(c, 4, -13.5, 9, -4, 3, pal.shade);
+  ell(c, 9.3, -3.5, 1.9, 1.7, pal.base, PAL.ink, 1);
+  // Elizabethan ruff: scallops then disc
+  const rx0 = 2.5, ry0 = -16.6;
+  c.fillStyle = pal.ruff; c.strokeStyle = PAL.ink; c.lineWidth = 1;
+  for (let i = 0; i < 9; i++) {
+    const a = (i / 9) * TAU;
+    c.beginPath(); c.ellipse(rx0 + Math.cos(a) * 6, ry0 + Math.sin(a) * 2.4, 1.7, 1.5, 0, 0, TAU); c.fill(); c.stroke();
+  }
+  ell(c, rx0, ry0, 6, 2.3, pal.ruff, PAL.ink, 1);
+  // head, tilted forward
+  ell(c, 4.5, -21, 4.7, 4.2, pal.base, PAL.ink, 2, 0.35);
+  // hair tufts
+  c.fillStyle = PAL.ink;
+  c.fillRect(1.6, -25.4, 1, 2.2); c.fillRect(3.6, -26, 1, 2.6); c.fillRect(5.8, -25.6, 1, 2);
+  // sunken sockets + mouth
+  ell(c, 3.1, -21.6, 1.4, 1.5, PAL.ink);
+  ell(c, 6.4, -21, 1.4, 1.5, PAL.ink);
+  c.fillRect(5, -18.9, 2.4, 1);
+}
+const PAL_RESTLESS = { base: PAL.green, shade: PAL.greenShade, ruff: PAL.bone };
+function drawRestless(c, x, y, s, frame) {
+  c.save(); c.translate(x, y); c.scale(s, s);
+  drawRestlessBody(c, frame, PAL_RESTLESS, false);
+  c.restore();
+}
+
+// ---------------------------------------------------------------- THE GHOST
+// 50%-alpha cyan Restless silhouette, no shadow, no legs, crown outline, wavers by frame.
+// Pre-rendered at alpha 1 and blitted at 0.5 so overlapping shapes do not double up.
+const PAL_GHOST = { base: PAL.ghost, shade: PAL.ghostShade, ruff: '#dff7ff' };
+function drawGhost(c, x, y, s, frame) {
+  c.save(); c.translate(x, y); c.scale(s, s);
+  c.transform(1, 0, frame ? 0.08 : -0.08, 1, 0, 0);   // waver: tiny shear
+  drawRestlessBody(c, frame, PAL_GHOST, true);
+  // crown outline on the head
+  c.lineWidth = 1.4; c.strokeStyle = PAL.gold; c.lineJoin = 'miter';
+  c.beginPath();
+  c.moveTo(1.2, -24.2); c.lineTo(1.2, -28); c.lineTo(3.2, -26); c.lineTo(4.8, -29); c.lineTo(6.4, -26); c.lineTo(8.4, -28); c.lineTo(8.4, -24.2);
+  c.stroke();
+  c.restore();
+}
+
+// ---------------------------------------------------------------- YORICK (skull)
+// frame 0|1 = jaw shut / jaw chattering open. ~15 px tall.
+function drawYorick(c, x, y, s, frame) {
+  c.save(); c.translate(x, y); c.scale(s, s);
+  c.lineJoin = 'round';
+  shadow(c, 0, 0, 5, 1.7);
+  const jaw = frame ? 1.6 : 0;
+  // jaw
+  rrect(c, -4.2, -6 + jaw, 8.4, 4, 1.2, PAL.bone, PAL.ink, 1.5);
+  c.fillStyle = PAL.ink;
+  for (const tx of [-2.6, -0.6, 1.4]) c.fillRect(tx, -6 + jaw, 1.1, 1.6);
+  // cranium
+  ell(c, 0, -9.8, 6.2, 5.6, PAL.bone, PAL.ink, 2);
+  // shade tone on the right
+  c.beginPath();
+  c.moveTo(2.2, -14.8);
+  c.quadraticCurveTo(7.4, -11.5, 4.6, -5.2);
+  c.quadraticCurveTo(4.4, -9.5, 2.2, -14.8);
+  c.closePath();
+  c.fillStyle = PAL.boneShade; c.fill();
+  // sockets + nose
+  ell(c, -2.5, -10.2, 1.8, 2, PAL.ink);
+  ell(c, 2.5, -10.2, 1.8, 2, PAL.ink);
+  c.fillStyle = PAL.ink; c.beginPath(); c.moveTo(0, -8.4); c.lineTo(-0.9, -6.6); c.lineTo(0.9, -6.6); c.closePath(); c.fill();
+  c.restore();
+}
+
+// ---------------------------------------------------------------- BRUTE (Gravedigger / Claudius)
+// ~50 px tall at k=1 (plus the shovel over the shoulder). frame 0|1 = lumbering step.
+function drawBrute(c, frame, pal, accessory, crown) {
+  c.lineJoin = 'round';
+  const bob = frame ? 1.2 : 0;
+  shadow(c, 0, 0, 17, 5);
+  // legs
+  const xs = frame ? [-9.5, 1] : [-12, 3.5];
+  for (const lx of xs) {
+    rrect(c, lx, -11, 8.5, 11, 2, pal.shade, PAL.ink, 2);
+    rrect(c, lx - 0.8, -3, 10, 3, 1, PAL.shoe, PAL.ink, 1.2);
+  }
+  c.translate(0, -bob);
+  // shovel handle behind (over the shoulder)
+  if (accessory === 'shovel') {
+    limb(c, 19, -14, -3, -52, 3, PAL.stock);
+    c.beginPath(); c.moveTo(-9, -60); c.lineTo(0, -58); c.lineTo(0.5, -47); c.lineTo(-7.5, -49); c.closePath();
+    c.fillStyle = PAL.pump; c.fill(); c.lineWidth = 2; c.strokeStyle = PAL.ink; c.stroke();
+    c.fillStyle = PAL.gunHi; c.fillRect(-7.5, -57.5, 1.4, 8);
+  }
+  // back arm
+  limb(c, -14, -32, -18, -12, 7, pal.base);
+  ell(c, -18.5, -9.5, 4.2, 3.6, pal.base, PAL.ink, 2);
+  // torso
+  c.beginPath();
+  c.moveTo(-17, -9);
+  c.quadraticCurveTo(-21, -30, -9, -39);
+  c.quadraticCurveTo(0, -42, 9, -39);
+  c.quadraticCurveTo(21, -30, 17, -9);
+  c.quadraticCurveTo(0, -5, -17, -9);
+  c.closePath();
+  c.fillStyle = pal.base; c.fill(); c.lineWidth = 2; c.strokeStyle = PAL.ink; c.stroke();
+  // shade tone right
+  c.beginPath();
+  c.moveTo(6, -39.6);
+  c.quadraticCurveTo(20.2, -30, 16.6, -9.4);
+  c.lineTo(9, -7.6);
+  c.quadraticCurveTo(12.5, -25, 6, -39.6);
+  c.closePath();
+  c.fillStyle = pal.shade; c.fill();
+  // strap
+  c.beginPath(); c.moveTo(-15, -22); c.lineTo(15, -19); c.lineTo(15, -15); c.lineTo(-15, -18); c.closePath();
+  c.fillStyle = pal.shade; c.fill(); c.lineWidth = 1.2; c.strokeStyle = PAL.ink; c.stroke();
+  // head, sunk into the shoulders
+  ell(c, 2, -43, 6.6, 6.2, pal.head, PAL.ink, 2);
+  c.fillStyle = PAL.ink;
+  c.fillRect(-2.6, -46.2, 9.6, 1.7);           // brow
+  ell(c, 0.2, -43.6, 1.15, 1.2, PAL.ink);      // eyes, close together
+  ell(c, 4.6, -43.6, 1.15, 1.2, PAL.ink);
+  c.fillRect(1, -40.2, 3.4, 1);                // mouth
+  if (crown) {
+    c.beginPath();
+    c.moveTo(-3.5, -47.5); c.lineTo(-3.5, -54); c.lineTo(-0.8, -50.5); c.lineTo(2, -55.5); c.lineTo(4.8, -50.5); c.lineTo(7.5, -54); c.lineTo(7.5, -47.5);
+    c.closePath();
+    c.fillStyle = PAL.gold; c.fill(); c.lineWidth = 1.6; c.strokeStyle = PAL.ink; c.lineJoin = 'miter'; c.stroke(); c.lineJoin = 'round';
+  }
+  // front arm + fist
+  limb(c, 14, -32, 20, -15, 7, pal.base);
+  ell(c, 20.5, -13, 4.2, 3.6, pal.base, PAL.ink, 2);
+  if (accessory === 'goblet') {
+    rrect(c, 17, -25, 7.5, 8, 1.5, PAL.gold, PAL.ink, 1.6);     // cup
+    c.fillStyle = PAL.ink; c.fillRect(20, -17, 1.6, 4);         // stem
+    ell(c, 20.8, -12.4, 3.4, 1.3, PAL.gold, PAL.ink, 1.2);      // foot
+    c.fillStyle = PAL.muzzle; c.fillRect(18.2, -24, 1.2, 5);    // highlight
+  }
+}
+const PAL_GRAVEDIGGER = { base: PAL.greyGreen, shade: PAL.greyGreenShade, head: PAL.greyGreen };
+const PAL_CLAUDIUS = { base: PAL.purple, shade: PAL.purpleShade, head: PAL.paleFace };
+function drawGravedigger(c, x, y, s, frame) {
+  c.save(); c.translate(x, y); c.scale(s, s);
+  drawBrute(c, frame, PAL_GRAVEDIGGER, 'shovel', false);
+  c.restore();
+}
+// Claudius: the Gravedigger at 3x, purple robe, gold crown, goblet, pale lavender face.
+function drawClaudius(c, x, y, s, frame) {
+  c.save(); c.translate(x, y); c.scale(s * 3, s * 3);
+  drawBrute(c, frame, PAL_CLAUDIUS, 'goblet', true);
+  c.restore();
+}
+
+// ---------------------------------------------------------------- HUD + small things
+// Heart: pivot bottom-centre (the point). ~11 x 10 px.
+function drawHeart(c, x, y, s) {
+  c.save(); c.translate(x, y); c.scale(s, s); c.lineJoin = 'round';
+  c.beginPath();
+  c.moveTo(0, 0);
+  c.bezierCurveTo(-6.2, -4.2, -6.4, -10.4, -2.8, -10.4);
+  c.quadraticCurveTo(-0.9, -10.4, 0, -8.2);
+  c.quadraticCurveTo(0.9, -10.4, 2.8, -10.4);
+  c.bezierCurveTo(6.4, -10.4, 6.2, -4.2, 0, 0);
+  c.closePath();
+  c.fillStyle = PAL.heart; c.fill(); c.lineWidth = 2; c.strokeStyle = PAL.ink; c.stroke();
+  ell(c, -2.7, -7.6, 1.3, 0.9, PAL.heartHi, null, 0, -0.5);
+  c.restore();
+}
+function drawHeartEmpty(c, x, y, s) {
+  c.save(); c.translate(x, y); c.scale(s, s); c.lineJoin = 'round';
+  c.beginPath(); c.moveTo(0, 0);
+  c.bezierCurveTo(-6.2, -4.2, -6.4, -10.4, -2.8, -10.4); c.quadraticCurveTo(-0.9, -10.4, 0, -8.2);
+  c.quadraticCurveTo(0.9, -10.4, 2.8, -10.4); c.bezierCurveTo(6.4, -10.4, 6.2, -4.2, 0, 0); c.closePath();
+  c.fillStyle = 'rgba(7,7,13,0.55)'; c.fill(); c.lineWidth = 2; c.strokeStyle = rgba(PAL.cream, 0.35); c.stroke();
+  c.restore();
+}
+// Shell pip for the HUD tube: pivot bottom-centre, 5 x 10 px. empty = hollow spent pip.
+function drawShellPip(c, x, y, s, empty) {
+  c.save(); c.translate(x, y); c.scale(s, s);
+  if (empty) {
+    c.globalAlpha *= 0.35;
+    rrect(c, -2.5, -10, 5, 10, 1.2, null, PAL.cream, 1.2);
+  } else {
+    rrect(c, -2.5, -10, 5, 7.6, 1.2, PAL.amber, PAL.ink, 1.2);
+    rrect(c, -2.5, -3, 5, 3, 0.6, PAL.brass, PAL.ink, 1.2);
+    c.fillStyle = PAL.muzzle; c.fillRect(-1.6, -9, 1, 5.6);
+  }
+  c.restore();
+}
+// Ejected casing: pivot CENTRE (it tumbles), 5.2 x 2.6 px, rot in radians.
+function drawCasing(c, x, y, s, rot) {
+  c.save(); c.translate(x, y); c.scale(s, s); c.rotate(rot || 0);
+  rrect(c, -2.6, -1.3, 5.2, 2.6, 0.8, PAL.brass, PAL.ink, 1);
+  c.fillStyle = PAL.brassDark; c.fillRect(-2.6, -1.3, 1.5, 2.6);
+  c.fillStyle = PAL.muzzle; c.fillRect(-0.8, -1, 2.6, 0.7);
+  c.restore();
+}
+// Gate in the border wall. (x, y) = centre of the opening on the wall's centre-line.
+// side: 'N'|'E'|'S'|'W'. glow 0..1 tints the tunnel; the amber blob itself is FX.glow (cached).
+// 48 wide x 16 deep at s=1 (the border is 16 px).
+const GATE_ROT = { N: 0, E: Math.PI / 2, S: Math.PI, W: -Math.PI / 2 };
+function drawGate(c, x, y, s, side, glow) {
+  c.save(); c.translate(x, y); c.scale(s, s); c.rotate(GATE_ROT[side] || 0);   // local: wall along x, arena is +y
+  // wall slab around the opening
+  c.fillStyle = PAL.border; c.fillRect(-30, -8, 60, 16);
+  // the opening: a dark tunnel
+  rrect(c, -14, -8.5, 28, 17, 0.8, PAL.gateDark, PAL.ink, 2);
+  // tunnel floor tint when telegraphing
+  if (glow > 0) { c.fillStyle = 'rgba(255,179,71,' + (0.45 * glow).toFixed(3) + ')'; c.fillRect(-12, 1, 24, 6); }
+  // steps
+  c.fillStyle = PAL.borderHi; c.fillRect(-12, -3, 24, 1.2); c.fillRect(-12, 2, 24, 1.2);
+  // posts
+  rrect(c, -19, -9.5, 5, 19, 1, PAL.borderHi, PAL.ink, 2);
+  rrect(c, 14, -9.5, 5, 19, 1, PAL.borderHi, PAL.ink, 2);
+  // torches on the arena side of the posts
+  const t = 0.6 + 0.4 * (glow || 0);
+  ell(c, -16.5, 8.5, 2.2, 2.2, PAL.amber, PAL.ink, 1);
+  ell(c, 16.5, 8.5, 2.2, 2.2, PAL.amber, PAL.ink, 1);
+  c.globalAlpha = t; ell(c, -16.5, 8.5, 1, 1, PAL.muzzle); ell(c, 16.5, 8.5, 1, 1, PAL.muzzle); c.globalAlpha = 1;
+  c.restore();
+}
+
+// ---------------------------------------------------------------- composition
+// Gun OVER the body when aiming down (sin >= 0), UNDER when aiming up. Body flips when cos < 0.
+function drawNunWithGun(c, x, y, s, angle, pumpOffset, o) {
+  o = Object.assign({}, o || {});
+  const facing = Math.cos(angle) < 0 ? -1 : 1;
+  o.facing = facing;
+  const hx = x + NUN_HAND.x * s * facing, hy = y + NUN_HAND.y * s;
+  if (Math.sin(angle) >= 0) { drawNun(c, x, y, s, o); drawGun(c, hx, hy, s, angle, pumpOffset); }
+  else { drawGun(c, hx, hy, s, angle, pumpOffset); drawNun(c, x, y, s, o); }
+}
+
+// ---------------------------------------------------------------- pre-render
+// Every body is drawn ONCE at boot into an offscreen canvas at 2x (both frames), plus a white
+// `source-in` silhouette for hit flashes. The world blits them with drawImage; nothing here runs per frame.
+const SPR_K = 2;
+// w/h = the local-space box, ax/ay = the FEET pivot inside it, sx/sy = the ground shadow radii,
+// foot = how far the feet sit below the entity's collision centre.
+const SPRITE_BOX = {
+  nun: { w: 26, h: 38, ax: 13, ay: 35, sx: 9, sy: 3, foot: 14, draw: (c, x, y, f) => drawNun(c, x, y, 1, { facing: 1, walk: f }) },
+  restless: { w: 34, h: 34, ax: 14, ay: 31, sx: 8, sy: 2.6, foot: 12, draw: (c, x, y, f) => drawRestless(c, x, y, 1, f) },
+  ghost: { w: 38, h: 36, ax: 17, ay: 32, sx: 0, sy: 0, foot: 12, alpha: 0.5, draw: (c, x, y, f) => drawGhost(c, x, y, 1, f) },
+  yorick: { w: 20, h: 20, ax: 10, ay: 18, sx: 5, sy: 1.7, foot: 7, draw: (c, x, y, f) => drawYorick(c, x, y, 1, f) },
+  gravedigger: { w: 56, h: 68, ax: 26, ay: 64, sx: 17, sy: 5, foot: 22, draw: (c, x, y, f) => drawGravedigger(c, x, y, 1, f) },
+  claudius: { w: 152, h: 180, ax: 74, ay: 176, sx: 51, sy: 15, foot: 52, draw: (c, x, y, f) => drawClaudius(c, x, y, 1, f) },
+};
+const SPR = {};
+function buildSprites() {
+  SPR_SHADOWS = false;
+  for (const key in SPRITE_BOX) {
+    const b = SPRITE_BOX[key], img = [], white = [];
+    for (let f = 0; f < 2; f++) {
+      const cv = makeCanvas(Math.ceil(b.w * SPR_K), Math.ceil(b.h * SPR_K));
+      const c = cv.getContext('2d');
+      c.setTransform(SPR_K, 0, 0, SPR_K, 0, 0);
+      b.draw(c, b.ax, b.ay, f);
+      img.push(cv);
+      const wv = makeCanvas(cv.width, cv.height), wc = wv.getContext('2d');
+      wc.drawImage(cv, 0, 0);
+      wc.globalCompositeOperation = 'source-in';
+      wc.fillStyle = '#ffffff'; wc.fillRect(0, 0, wv.width, wv.height);
+      white.push(wv);
+    }
+    SPR[key] = { img, white, box: b };
+  }
+  SPR_SHADOWS = true;
+}
+// blit a pre-rendered body: o = { face, sx, sy, rot, white }
+function blitBody(c, key, frame, x, feetY, o) {
+  const s = SPR[key]; if (!s) return;
+  const b = s.box, img = (o && o.white) ? s.white[frame & 1] : s.img[frame & 1];
+  c.save();
+  c.translate(x, feetY);
+  if (o && o.rot) c.rotate(o.rot);
+  c.scale(((o && o.sx) || 1) * ((o && o.face) || 1), (o && o.sy) || 1);
+  c.drawImage(img, -b.ax, -b.ay, b.w, b.h);
+  c.restore();
+}
+
+// ---------------------------------------------------------------- the nun in the world
+const NUN_FOOT = SPRITE_BOX.nun.foot;   // feet below her collision centre
+const VEIL_ANCHOR = 24, VEIL_LAG = 0.4, VEIL_W = 6.5;   // the trail hangs off the back of the coif
+const NUN_LEAN = 900, NUN_STRETCH = 0.18, NUN_SQUASH = 0.14, NUN_WALK_HZ = 8;
+const PICKUP_HEART_S = 1.7, HUD_HEART_S = 1.7, HUD_PIP_S = 1.6;
+function drawVeilTrail(c, p) {
+  const ax = p.x, ay = p.y + NUN_FOOT - VEIL_ANCHOR, v = p.veil;
+  if (Math.abs(v[2].x - ax) + Math.abs(v[2].y - ay) < 1.5) return;   // standing still: nothing to trail
+  const pts = [{ x: ax, y: ay }, v[0], v[1], v[2]];
+  const left = [], right = [];
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
+    const [nx, ny] = norm(-(b.y - a.y), b.x - a.x);
+    const w = VEIL_W * (1 - i / (pts.length - 1)) + 0.6;
+    left.push([pts[i].x + nx * w, pts[i].y + ny * w]);
+    right.push([pts[i].x - nx * w, pts[i].y - ny * w]);
+  }
+  c.beginPath();
+  c.moveTo(left[0][0], left[0][1]);
+  for (let i = 1; i < left.length; i++) c.lineTo(left[i][0], left[i][1]);
+  for (let i = right.length - 1; i >= 0; i--) c.lineTo(right[i][0], right[i][1]);
+  c.closePath();
+  c.fillStyle = PAL.habit; c.fill();
+  c.lineWidth = 1.5; c.strokeStyle = PAL.ink; c.lineJoin = 'round'; c.stroke();
+}
+// pre-rendered body, procedural gun: the gun rotates to aim, over the body when aiming down and
+// under when aiming up; the body flips when the aim crosses vertical (the Designer's drawNunWithGun rule).
+function drawNunSprite(c, p) {
+  const feetY = p.y + NUN_FOOT;
+  const facing = Math.cos(p.aim) < 0 ? -1 : 1;
+  const frame = p.moving ? Math.floor(p.walkT * NUN_WALK_HZ) & 1 : 0;
+  drawVeilTrail(c, p);
+  drawShadow(c, p.x, feetY, SPRITE_BOX.nun.sx, SPRITE_BOX.nun.sy);
+  const st = p.stretch || 0;
+  c.save();
+  c.translate(p.x, feetY);
+  c.rotate(clamp(p.kvx / NUN_LEAN, -0.35, 0.35));                                   // lean into the recoil
+  if (st > 0.01) { c.rotate(p.aim); c.scale(1 + st * NUN_STRETCH, 1 - st * NUN_SQUASH); c.rotate(-p.aim); }
+  const pump = clamp((p.gunSlide || 0) / CONFIG.GUN_SLIDE_PX, 0, 1);
+  const body = () => blitBody(c, 'nun', frame, 0, 0, { face: facing });
+  const gun = () => drawGun(c, NUN_HAND.x * facing, NUN_HAND.y, 1, p.aim, pump);
+  if (Math.sin(p.aim) >= 0) { body(); gun(); } else { gun(); body(); }
   c.restore();
 }
 
@@ -462,13 +917,16 @@ const FX = (() => {
     hurtFlash = Math.max(0, hurtFlash - dt * 2.5);
     whiteFlash = Math.max(0, whiteFlash - dt * 6);
   }
-  // pre-rendered radial blobs (no per-frame gradients)
-  let glowBlob, vignette, redVignette;
+  // pre-rendered radial blobs: built once at boot, blitted forever (no per-frame gradients anywhere)
+  let glowBlob, gateGlow, vignetteCv, redVignette;
   function prerender() {
     glowBlob = makeCanvas(128, 128);
     { const g = glowBlob.getContext('2d'); const gr = g.createRadialGradient(64, 64, 4, 64, 64, 64); gr.addColorStop(0, 'rgba(255,243,196,0.9)'); gr.addColorStop(0.35, 'rgba(255,179,71,0.45)'); gr.addColorStop(1, 'rgba(255,179,71,0)'); g.fillStyle = gr; g.fillRect(0, 0, 128, 128); }
-    vignette = makeCanvas(CONFIG.W, CONFIG.H);
-    { const g = vignette.getContext('2d'); const gr = g.createRadialGradient(CONFIG.W / 2, CONFIG.H / 2, CONFIG.H * 0.45, CONFIG.W / 2, CONFIG.H / 2, CONFIG.W * 0.72); gr.addColorStop(0, 'rgba(0,0,0,0)'); gr.addColorStop(1, 'rgba(0,0,0,0.55)'); g.fillStyle = gr; g.fillRect(0, 0, CONFIG.W, CONFIG.H); }
+    // the Designer's amber blob: torches, gate telegraphs, any warm light on the stones
+    gateGlow = makeCanvas(128, 128);
+    { const g = gateGlow.getContext('2d'); const gr = g.createRadialGradient(64, 64, 2, 64, 64, 64); gr.addColorStop(0, 'rgba(255,179,71,0.9)'); gr.addColorStop(0.5, 'rgba(255,179,71,0.25)'); gr.addColorStop(1, 'rgba(255,179,71,0)'); g.fillStyle = gr; g.fillRect(0, 0, 128, 128); }
+    vignetteCv = makeCanvas(CONFIG.W, CONFIG.H);
+    { const g = vignetteCv.getContext('2d'); const gr = g.createRadialGradient(CONFIG.W / 2, CONFIG.H / 2, CONFIG.H * 0.32, CONFIG.W / 2, CONFIG.H / 2, CONFIG.H * 0.9); gr.addColorStop(0, 'rgba(0,0,0,0)'); gr.addColorStop(1, 'rgba(0,0,0,0.75)'); g.fillStyle = gr; g.fillRect(0, 0, CONFIG.W, CONFIG.H); }
     redVignette = makeCanvas(CONFIG.W, CONFIG.H);
     { const g = redVignette.getContext('2d'); const gr = g.createRadialGradient(CONFIG.W / 2, CONFIG.H / 2, CONFIG.H * 0.3, CONFIG.W / 2, CONFIG.H / 2, CONFIG.W * 0.65); gr.addColorStop(0, 'rgba(192,57,43,0)'); gr.addColorStop(1, 'rgba(192,57,43,0.9)'); g.fillStyle = gr; g.fillRect(0, 0, CONFIG.W, CONFIG.H); }
   }
@@ -493,14 +951,21 @@ const FX = (() => {
     }
     c.restore();
   }
+  function vignette(c, strength) {
+    c.save(); c.globalAlpha = strength == null ? 1 : strength; c.drawImage(vignetteCv, 0, 0); c.restore();
+  }
+  // amber light on the stones: torches, gate telegraphs, muzzle wash
+  function glow(c, x, y, r, a) {
+    c.save(); c.globalCompositeOperation = 'lighter'; c.globalAlpha = clamp01(a); c.drawImage(gateGlow, x - r, y - r, r * 2, r * 2); c.restore();
+  }
   function drawOverlays(c) {
-    c.drawImage(vignette, 0, 0);
+    vignette(c, 1);
     if (hurtFlash > 0) { c.globalAlpha = Math.min(1, hurtFlash); c.drawImage(redVignette, 0, 0); c.globalAlpha = 1; }
     if (whiteFlash > 0) { c.fillStyle = 'rgba(255,255,255,' + (whiteFlash * 0.5).toFixed(3) + ')'; c.fillRect(0, 0, CONFIG.W, CONFIG.H); }
   }
   function reset() { clearAll(); flashes.length = 0; pops.length = 0; hurtFlash = 0; whiteFlash = 0; cam.shakeT = 0; cam.shakeAmp = 0; cam.kickX = cam.kickY = cam.x = cam.y = cam.rot = 0; }
   return {
-    spawn, burst, update, draw, clearAll, reset, cam, shake, kick, flash, pop, tickRender, prerender, drawFlashes, drawOverlays,
+    spawn, burst, update, draw, clearAll, reset, cam, shake, kick, flash, pop, tickRender, prerender, drawFlashes, drawOverlays, vignette, glow,
     alive: () => aliveCount, hurt() { hurtFlash = 1; }, white(v = 1) { whiteFlash = Math.max(whiteFlash, v); },
   };
 })();
@@ -521,14 +986,17 @@ const Floor = (() => {
     // wall
     fc.strokeStyle = PAL.border; fc.lineWidth = CONFIG.BORDER * 2; fc.strokeRect(0, 0, CONFIG.W, CONFIG.H);
     fc.strokeStyle = '#3d4257'; fc.lineWidth = 2; fc.strokeRect(CONFIG.BORDER, CONFIG.BORDER, CONFIG.W - CONFIG.BORDER * 2, CONFIG.H - CONFIG.BORDER * 2);
-    // gate placeholders at the edge midpoints
-    fc.fillStyle = PAL.amber;
-    for (const g of gates()) { fc.globalAlpha = 0.85; fc.fillRect(g.x - (g.side === 'top' || g.side === 'bottom' ? 26 : 7), g.y - (g.side === 'left' || g.side === 'right' ? 26 : 7), g.side === 'top' || g.side === 'bottom' ? 52 : 14, g.side === 'left' || g.side === 'right' ? 52 : 14); }
-    fc.globalAlpha = 1;
+    // the four gates are static art: stamped once here, the amber glow flickers over them per frame
+    for (const g of gates()) drawGate(fc, g.x, g.y, 1, g.compass, 0);
   }
   function gates() {
     const B = CONFIG.BORDER, W = CONFIG.W, H = CONFIG.H;
-    return [{ side: 'top', x: W / 2, y: B / 2 }, { side: 'bottom', x: W / 2, y: H - B / 2 }, { side: 'left', x: B / 2, y: H / 2 }, { side: 'right', x: W - B / 2, y: H / 2 }];
+    return [
+      { side: 'top', compass: 'N', x: W / 2, y: B / 2 },
+      { side: 'bottom', compass: 'S', x: W / 2, y: H - B / 2 },
+      { side: 'left', compass: 'W', x: B / 2, y: H / 2 },
+      { side: 'right', compass: 'E', x: W - B / 2, y: H / 2 },
+    ];
   }
   function stamp(fn) {
     fc.save();
@@ -546,6 +1014,8 @@ function newPlayer() {
     aim: 0, aimX: 1, aimY: 0, aimDist: 100, facing: 1,
     hp: CONFIG.HEARTS, maxHp: CONFIG.HEARTS, iframes: 0, god: false,
     stretch: 0, gunKick: 0, gunSlide: 0, gunSlideV: 0, walkT: 0, moving: false,
+    // the veil trails 3 stored positions behind the head, drawn as a tapering polygon
+    veil: [{ x: CONFIG.W / 2, y: CONFIG.H / 2 }, { x: CONFIG.W / 2, y: CONFIG.H / 2 }, { x: CONFIG.W / 2, y: CONFIG.H / 2 }],
     gun: { state: 'READY', timer: 0, shells: CONFIG.SHELLS, pumped: false, holdBlock: true, buffered: false },
     stats: {
       pellets: CONFIG.PELLETS, spread: CONFIG.SPREAD_DEG, pelletSpeed: CONFIG.PELLET_SPEED, pelletLife: CONFIG.PELLET_LIFE, fullT: CONFIG.PELLET_FULL_T,
@@ -572,6 +1042,9 @@ function updatePlayer(dt) {
   if (p.y < B) { p.y = B; if (p.kvy < 0) p.kvy = 0; } else if (p.y > CONFIG.H - B) { p.y = CONFIG.H - B; if (p.kvy > 0) p.kvy = 0; }
   if (p.iframes > 0) p.iframes -= dt;
   p.stretch *= 0.82; p.gunKick *= 0.78;
+  // veil: a 3-link chain lagging behind the head anchor
+  let hx = p.x, hy = p.y + NUN_FOOT - VEIL_ANCHOR;
+  for (const v of p.veil) { v.x = lerp(v.x, hx, VEIL_LAG); v.y = lerp(v.y, hy, VEIL_LAG); hx = v.x; hy = v.y; }
   // the pump block is a spring, not a decay: it snaps back and overshoots forward, so the rack reads at 1x
   p.gunSlideV += (-CONFIG.SLIDE_K * p.gunSlide - CONFIG.SLIDE_DAMP * p.gunSlideV) * dt;
   p.gunSlide += p.gunSlideV * dt;
@@ -609,7 +1082,7 @@ function fire() {
   g.shells--; g.state = 'PUMPING'; g.timer = s.pumpT; g.pumped = false; g.buffered = false; G.shots++;
   // THUNDERCLAP: every fourth shot hits twice as hard and shakes the courtyard
   const thunder = !!s.thunder && G.shots % CONFIG.THUNDER_EVERY === 0;
-  const shot = { kills: 0, n: G.shots, knock: thunder ? CONFIG.THUNDER_KNOCK : 1 };
+  const shot = { kills: 0, n: G.shots, knock: thunder ? CONFIG.THUNDER_KNOCK : 1, cx: 0, cy: 0, age: 0, queued: false };
   const mx = p.x + p.aimX * CONFIG.MUZZLE_OFF, my = p.y - 1 + p.aimY * CONFIG.MUZZLE_OFF;
   const spread = (s.spread * Math.PI) / 180, n = s.pellets;
   for (let i = 0; i < n; i++) {
@@ -695,24 +1168,21 @@ function updateCasings(dt) {
     if (done || k.t > 2.5) { stampCasing(k); cs[i] = cs[cs.length - 1]; cs.pop(); }
   }
 }
-function drawCasing(c, k) {
-  c.save(); c.translate(k.x, k.y - k.z); c.rotate(k.rot);
-  c.fillStyle = PAL.brass; c.fillRect(-3, -1.3, 6, 2.6); c.fillStyle = PAL.red; c.fillRect(1.2, -1.3, 1.8, 2.6);
-  c.restore();
-}
-function drawCasings(c) { for (const k of G.casings) { if (k.z > 1) { c.fillStyle = 'rgba(0,0,0,0.3)'; c.fillRect(k.x - 2, k.y - 1, 4, 2); } drawCasing(c, k); } }
+function drawCasings(c) { for (const k of G.casings) { if (k.z > 1) { c.fillStyle = 'rgba(0,0,0,0.3)'; c.fillRect(k.x - 2, k.y - 1, 4, 2); } drawCasing(c, k.x, k.y - k.z, 1, k.rot); } }
 function stampCasing(k) {
   const B = CONFIG.BORDER; if (k.x < B || k.x > CONFIG.W - B || k.y < B || k.y > CONFIG.H - B) return;
-  k.z = 0; Floor.stamp((fc) => drawCasing(fc, k));
+  k.z = 0; Floor.stamp((fc) => drawCasing(fc, k.x, k.y, 1, k.rot));
 }
 
 // enemies: flat objects, all circles. Straight-at-you steering, one-pass separation, knockback under per-tick friction.
-// Shapes are PLACEHOLDERS (distinct colour + size); the art pass (Task 6) swaps them for the Designer's sprites.
+// Each type keys a pre-rendered sprite of the same name in SPR; `shade` is its gore/decal tone.
 const ENEMY_DEFS = {
-  restless: { hp: 3, speed: 90, r: 12, mass: 1, knock: 1, lunge: { range: 90, speed: 300 }, score: 10, color: PAL.green, shade: PAL.greenShade, shape: 'restless' },
-  yorick: { hp: 1, speed: 140, r: 7, mass: 0.5, knock: 1, wobble: true, score: 5, color: PAL.bone, shade: '#cdc6b3', shape: 'skull' },
-  gravedigger: { hp: 14, speed: 60, r: 24, mass: 4, knock: 0.3, heartDrop: 0.3, score: 50, color: '#7a9a7a', shade: '#4e6a52', shape: 'brute' },
-  claudius: { hp: 80, speed: 45, r: 36, mass: 8, knock: 0.1, spawnYoricks: { every: 4, n: 6 }, score: 500, boss: true, color: PAL.purple, shade: '#4e2568', shape: 'king' },
+  restless: { hp: 3, speed: 90, r: 12, mass: 1, knock: 1, lunge: { range: 90, speed: 300 }, score: 10, color: PAL.green, shade: PAL.greenShade },
+  yorick: { hp: 1, speed: 140, r: 7, mass: 0.5, knock: 1, wobble: true, score: 5, color: PAL.bone, shade: PAL.boneShade },
+  gravedigger: { hp: 14, speed: 60, r: 24, mass: 4, knock: 0.3, heartDrop: 0.3, score: 50, color: PAL.greyGreen, shade: PAL.greyGreenShade },
+  claudius: { hp: 80, speed: 45, r: 36, mass: 8, knock: 0.1, spawnYoricks: { every: 4, n: 6 }, score: 500, boss: true, color: PAL.purple, shade: PAL.purpleShade },
+  // the Ghost's art is done; its spawn rule and wave slot belong to the SHOULD list (M7)
+  ghost: { hp: 5, speed: 55, r: 12, mass: 1, knock: 0, alpha: 0.5, noSeparation: true, score: 30, color: PAL.ghost, shade: PAL.ghostShade },
 };
 function spawnEnemy(type, x, y) {
   const def = ENEMY_DEFS[type] || ENEMY_DEFS.restless;
@@ -722,7 +1192,7 @@ function spawnEnemy(type, x, y) {
     id: G.nextId++, type: ENEMY_DEFS[type] ? type : 'restless', def,
     x: clamp(+x || 0, B, CONFIG.W - B), y: clamp(+y || 0, B, CONFIG.H - B), kvx: 0, kvy: 0,
     r: def.r, hp: def.hp, maxHp: def.hp, speed: def.speed, mass: def.mass, knock: def.knock,
-    flash: 0, squash: 0, frame: 0, animT: rand(1), spawnT: 0.25, dead: false, lastShot: null,
+    flash: 0, squash: 0, frame: 0, face: 1, animT: rand(1), spawnT: 0.25, dead: false, lastShot: null,
     wobT: rand(TAU), bossT: def.spawnYoricks ? def.spawnYoricks.every : 0,
   };
   G.enemies.push(e); return e;
@@ -757,6 +1227,7 @@ function updateEnemies(dt) {
       // Yoricks weave: a sine term perpendicular to the approach, so a pack arrives as a shoal
       if (e.def.wobble) { e.wobT += dt; const w = Math.sin(e.wobT * CONFIG.WOBBLE_FREQ) * CONFIG.WOBBLE_AMP; mvx -= dy * sp * w; mvy += dx * sp * w; }
       e.animT += (dt * sp) / 11; e.frame = Math.floor(e.animT) % 2;
+      if (Math.abs(dx) > 0.15) e.face = dx < 0 ? -1 : 1;   // sprites face +x; flip toward the nun
     }
     e.x += (mvx + e.kvx) * dt; e.y += (mvy + e.kvy) * dt;
     e.kvx *= CONFIG.FRICTION; e.kvy *= CONFIG.FRICTION;
@@ -764,8 +1235,9 @@ function updateEnemies(dt) {
   // 2. one-pass separation weighted by inverse mass; a flier hands 30% of its velocity to whatever it hits (the ripple)
   for (let i = 0; i < es.length; i++) {
     const a = es[i]; if (a.dead) continue;
+    if (a.def.noSeparation) continue;
     for (let j = i + 1; j < es.length; j++) {
-      const b = es[j]; if (b.dead) continue;
+      const b = es[j]; if (b.dead || b.def.noSeparation) continue;
       let dx = b.x - a.x, dy = b.y - a.y; const rr = a.r + b.r; let d2 = dx * dx + dy * dy;
       if (d2 >= rr * rr) continue;
       if (d2 < 1e-4) { dx = rand(-1, 1); dy = rand(-1, 1); d2 = dx * dx + dy * dy || 1; }
@@ -812,6 +1284,9 @@ function hitEnemy(e, b) {
 function killEnemy(e, shot) {
   if (e.dead) return; e.dead = true;
   const def = e.def; shot = shot || { kills: 0 }; shot.kills++;
+  // the shot that made this kill collects the centroid for its multikill callout
+  shot.cx = (shot.cx || 0) + e.x; shot.cy = (shot.cy || 0) + e.y; shot.age = shot.age || 0;
+  if (!shot.queued) { shot.queued = true; G.pendingShots.push(shot); }
   // the corpse's momentum passes to whoever it was touching: the front row pops and the row behind is thrown
   if (e.kvx * e.kvx + e.kvy * e.kvy > 1) {
     for (const o of G.enemies) {
@@ -877,47 +1352,21 @@ function hurt(src) {
   Audio.hurt();
   if (p.hp <= 0) { p.hp = 0; setState('GAMEOVER'); }
 }
+// one drawImage per body: the sprite (both frames + a white silhouette) was pre-rendered at boot.
+// Squash/stretch scales around the feet pivot; the ground shadow is drawn flat underneath.
+const ENEMY_SQUASH = 0.22, ENEMY_SPAWN_POP = 0.28, SPAWN_POP_T = 0.25;
 function drawEnemy(c, e) {
-  const def = e.def, r = e.r;
-  drawShadow(c, e.x, e.y + r * 0.9, r * 1.1, r * 0.35);
-  const bob = !G.dummies && e.frame ? -1.5 : 0;
-  c.save(); c.translate(e.x, e.y + r);
-  const sq = e.squash || 0, sp = e.spawnT > 0 ? e.spawnT / 0.25 : 0;
-  c.scale(1 + sq * 0.25 + sp * 0.3, 1 - sq * 0.2 - sp * 0.3);
-  c.translate(0, -r + bob);
-  if (e.flash > 0) { c.fillStyle = '#ffffff'; c.beginPath(); c.arc(0, 0, r + 1, 0, TAU); c.fill(); c.restore(); return; }
-  c.lineWidth = 2; c.strokeStyle = PAL.outline;
-  c.fillStyle = def.shade; c.beginPath(); c.arc(0, 0, r, 0, TAU); c.fill(); c.stroke();
-  c.fillStyle = def.color; c.beginPath(); c.arc(-r * 0.2, -r * 0.2, r * 0.72, 0, TAU); c.fill();
-  if (def.shape === 'restless') {
-    c.strokeStyle = PAL.bone; c.lineWidth = 3; c.beginPath(); c.arc(0, r * 0.35, r * 0.75, Math.PI * 0.15, Math.PI * 0.85); c.stroke();
-  } else if (def.shape === 'brute') {
-    // shovel across the shoulder
-    c.strokeStyle = '#6b4a2c'; c.lineWidth = 3; c.beginPath(); c.moveTo(r * 0.2, r * 0.7); c.lineTo(r * 1.0, -r * 0.7); c.stroke();
-    c.fillStyle = PAL.border; c.fillRect(r * 0.82, -r * 1.05, r * 0.42, r * 0.42);
-  } else if (def.shape === 'king') {
-    // gold crown: the one thing that says boss at a glance
-    c.fillStyle = PAL.gold; c.strokeStyle = PAL.outline; c.lineWidth = 2;
-    c.beginPath(); c.moveTo(-r * 0.62, -r * 0.66); c.lineTo(0, -r * 1.3); c.lineTo(r * 0.62, -r * 0.66); c.closePath(); c.fill(); c.stroke();
-    c.fillStyle = PAL.gold; c.fillRect(-r * 0.66, -r * 0.72, r * 1.32, r * 0.2);
-    c.strokeStyle = PAL.gold; c.lineWidth = 3; c.beginPath(); c.arc(0, r * 0.3, r * 0.55, Math.PI * 0.15, Math.PI * 0.85); c.stroke();
-  }
-  // eye sockets (a skull's are the whole face)
-  const ew = def.shape === 'skull' ? r * 0.34 : r * 0.32;
-  const ey = def.shape === 'skull' ? -r * 0.35 : def.shape === 'king' ? -r * 0.34 : -r * 0.5;
-  c.fillStyle = PAL.outline; c.fillRect(-r * 0.52, ey, ew, ew * 1.05); c.fillRect(r * 0.2, ey, ew, ew * 1.05);
-  if (def.shape === 'skull') { c.fillRect(-r * 0.26, r * 0.42, r * 0.52, r * 0.3); }
-  c.restore();
-}
-
-// pickups: the Gravedigger drops a heart 30% of the time; walking over it heals one, capped at maxHp
-function drawHeart(c, x, y, s, color) {
-  c.fillStyle = color;
-  c.beginPath();
-  c.moveTo(x, y + s * 0.9);
-  c.bezierCurveTo(x - s * 1.25, y - s * 0.2, x - s * 0.5, y - s * 1.05, x, y - s * 0.32);
-  c.bezierCurveTo(x + s * 0.5, y - s * 1.05, x + s * 1.25, y - s * 0.2, x, y + s * 0.9);
-  c.closePath(); c.fill();
+  const key = SPR[e.type] ? e.type : 'restless', box = SPRITE_BOX[key];
+  const feetY = e.y + box.foot;
+  if (box.sy > 0) drawShadow(c, e.x, feetY, box.sx, box.sy);
+  const sq = e.squash || 0, sp = e.spawnT > 0 ? e.spawnT / SPAWN_POP_T : 0;
+  const a = e.def.alpha || 1;
+  if (a !== 1) { c.save(); c.globalAlpha *= a; }
+  blitBody(c, key, e.frame, e.x, feetY, {
+    face: e.face, white: e.flash > 0,
+    sx: 1 + sq * ENEMY_SQUASH + sp * ENEMY_SPAWN_POP, sy: 1 - sq * (ENEMY_SQUASH * 0.8) - sp * ENEMY_SPAWN_POP,
+  });
+  if (a !== 1) c.restore();
 }
 function spawnPickup(x, y) {
   if (G.pickups.length >= CONFIG.MAX_PICKUPS) G.pickups.shift();
@@ -948,22 +1397,52 @@ function drawPickups(c) {
     if (left < CONFIG.HEART_BLINK && Math.floor(left * 8) % 2 === 0) continue;
     const bob = Math.sin(k.t * 4) * 2.5;
     drawShadow(c, k.x, k.y + 8, 8, 3);
-    drawHeart(c, k.x, k.y + bob, CONFIG.HEART_R, PAL.cream);
-    c.strokeStyle = PAL.gold; c.lineWidth = 1.5; c.stroke();
+    drawHeart(c, k.x, k.y + bob + 6, PICKUP_HEART_S);
   }
 }
 
-// floating texts
+// floating texts. `callout` items are the multikill lines and draw through the Designer's tween.
 function addText(str, x, y, opts = {}) {
   if (G.texts.length >= CONFIG.MAX_TEXTS) G.texts.shift();
-  G.texts.push({ str, x, y, t: 0, life: opts.life || 1, px: opts.px || 28, color: opts.color || PAL.cream, serif: !!opts.serif, vy: opts.vy || -30 });
+  G.texts.push({ str, x, y, t: 0, life: opts.life || 1, px: opts.px || 28, color: opts.color || PAL.cream, serif: !!opts.serif, vy: opts.vy || -30, callout: !!opts.callout });
 }
-function updateTexts(dt) { for (let i = G.texts.length - 1; i >= 0; i--) { const t = G.texts[i]; t.t += dt; t.y += t.vy * dt; if (t.t >= t.life) { G.texts[i] = G.texts[G.texts.length - 1]; G.texts.pop(); } } }
+function updateTexts(dt) { for (let i = G.texts.length - 1; i >= 0; i--) { const t = G.texts[i]; t.t += dt; if (!t.callout) t.y += t.vy * dt; if (t.t >= t.life) { G.texts[i] = G.texts[G.texts.length - 1]; G.texts.pop(); } } }
 function drawTexts(c) {
   for (const t of G.texts) {
+    if (t.callout) { drawCallout(c, t.x, t.y, t.str, t.t); continue; }
     const k = t.t / t.life, sc = k < 0.15 ? lerp(0.4, 1.15, k / 0.15) : k < 0.3 ? lerp(1.15, 1, (k - 0.15) / 0.15) : 1;
     c.save(); c.globalAlpha = k > 0.7 ? 1 - (k - 0.7) / 0.3 : 1; c.translate(t.x, t.y); c.scale(sc, sc);
     text(c, t.str, 0, 0, t.px, t.color, 'center', t.serif); c.restore();
+  }
+}
+// callout: pop with overshoot, rise 44 px, fade out (ui-scratch.html)
+function drawCallout(c, x, y, str, t) {
+  const sc = 0.5 + 0.5 * easeOutBack(clamp01(t / 0.22));
+  const rise = 44 * easeOutCubic(clamp01(t));
+  const a = t < 0.55 ? 1 : clamp01(1 - (t - 0.55) / 0.45);
+  if (a <= 0) return;
+  c.save(); c.globalAlpha = a; c.translate(x, y - rise); c.scale(sc, sc); c.rotate(-0.06);
+  uiText(c, str, 0, 0, FSERIF(30, true), PAL.amber, 'center', { stroke: 6, spacing: 1 });
+  c.restore();
+}
+// one callout per shot, at the centroid of that shot's kills, clamped inside the arena (spec §8)
+function addCallout(str, x, y) {
+  const I = CONFIG.CALLOUT_INSET, B = CONFIG.BORDER;
+  addText(str, clamp(x, B + I, CONFIG.W - B - I), clamp(y, B + I, CONFIG.H - B - I), { callout: true, life: CONFIG.CALLOUT_LIFE });
+}
+// a shot is scored once its pellets are spent, so kills that land on later ticks still count as one shot
+function resolveShots(dt) {
+  const ss = G.pendingShots;
+  for (let i = ss.length - 1; i >= 0; i--) {
+    const s = ss[i];
+    s.age += dt;
+    let live = false;
+    if (s.age < CONFIG.SHOT_RESOLVE_T) for (const b of G.pellets) if (b.shot === s) { live = true; break; }
+    if (live) continue;
+    const n = s.kills;
+    const str = n >= CONFIG.CALLOUT_YORICK ? 'POOR YORICK!' : n >= CONFIG.CALLOUT_ZOUNDS ? 'ZOUNDS!' : n >= CONFIG.CALLOUT_ALAS ? 'ALAS!' : '';
+    if (str) { addCallout(str, s.cx / n, s.cy / n); Audio.bell(1.7 + 0.05 * Math.min(n, 10)); }
+    ss[i] = ss[ss.length - 1]; ss.pop();
   }
 }
 
@@ -1051,30 +1530,42 @@ function updateWaves(dt) {
     }
   } else if (!G.telegraphs.length && G.enemies.length === 0) endWave();
 }
+// the gates themselves are stamped into the floor; this is the light on top of them:
+// a slow torch flicker always, an urgent amber pulse while a burst is telegraphing
+const GATE_GLOW_R = 70, GATE_TORCH = 0.35, GATE_FLICKER = 0.25;
 function drawGates(c) {
-  for (const tg of G.telegraphs) {
-    const g = tg.gate, k = 1 - clamp(tg.t / CONFIG.TELEGRAPH_T, 0, 1);
-    const horiz = g.side === 'top' || g.side === 'bottom';
-    const w = horiz ? 52 : 16, h = horiz ? 16 : 52;
-    c.save();
-    c.globalAlpha = 0.35 + 0.5 * Math.abs(Math.sin(k * 14));
-    c.fillStyle = PAL.amber; c.fillRect(g.x - w / 2, g.y - h / 2, w, h);
-    c.globalAlpha = 0.5 * (1 - k);
-    const [ix, iy] = gateInside(g, CONFIG.GATE_IN * k);
-    c.beginPath(); c.arc(ix, iy, 10 + 26 * k, 0, TAU); c.fill();
-    c.restore();
+  const gs = Floor.gates();
+  for (let i = 0; i < gs.length; i++) {
+    const g = gs[i];
+    const [ix, iy] = gateInside(g, 18);
+    const fl = 0.5 + 0.5 * Math.sin(RT * 9 + i * 1.7) * Math.sin(RT * 13.1 + i);
+    let a = GATE_TORCH + GATE_FLICKER * fl;
+    let k = 0;
+    for (const tg of G.telegraphs) if (tg.gate === g) k = Math.max(k, 1 - clamp(tg.t / CONFIG.TELEGRAPH_T, 0, 1));
+    if (k > 0) {
+      a += 0.55 * (0.55 + 0.45 * Math.abs(Math.sin(k * 14)));
+      drawGate(c, g.x, g.y, 1, g.compass, k);   // the tunnel mouth lights up
+      const [dx, dy] = gateInside(g, CONFIG.GATE_IN * k);
+      FX.glow(c, dx, dy, 18 + 34 * k, 0.5 * (1 - k));
+    }
+    FX.glow(c, ix, iy, GATE_GLOW_R, a);
   }
 }
-function drawWaveCard(c) {
-  if (!(G.waveCardT > 0)) return;
-  const k = 1 - G.waveCardT / CONFIG.WAVE_CARD_T; // 0 -> 1 over the card's life
-  const sc = k < 0.12 ? lerp(1.6, 1, k / 0.12) : 1;
-  const a = k > 0.6 ? 1 - (k - 0.6) / 0.4 : 1;
-  c.save(); c.globalAlpha = clamp(a, 0, 1);
-  c.translate(CONFIG.W / 2, 150); c.scale(sc, sc);
-  text(c, waveName(G.wave), 0, 0, 46, PAL.cream, 'center', true);
-  const sub = waveSub(G.wave);
-  if (sub) text(c, sub, 0, 40, 24, PAL.amber, 'center', true);
+// slam in over 0.3 s with overshoot, hold, fade out by t = 2 s (ui-scratch.html)
+function waveCardTween(t) {
+  const scale = t < 0.3 ? 1.6 - 0.6 * easeOutBack(clamp01(t / 0.3)) : 1;
+  const alpha = t < 1 ? clamp01(t / 0.06) : clamp01(1 - (t - 1));
+  return { scale, alpha };
+}
+function drawWaveCard(c, t, name, sub) {
+  const tw = waveCardTween(t);
+  if (tw.alpha <= 0) return;
+  c.save(); c.globalAlpha = tw.alpha; c.translate(CONFIG.W / 2, CONFIG.H * 0.42); c.scale(tw.scale, tw.scale);
+  const w = 640, h = sub ? 124 : 96;
+  rrect(c, -w / 2, -h / 2, w, h, 6, 'rgba(7,7,13,0.6)');
+  rule(c, -w / 2 + 36, -h / 2 - 1, w - 72); rule(c, -w / 2 + 36, h / 2 - 1, w - 72);
+  uiText(c, name, 0, sub ? -6 : 18, FSERIF(52), PAL.cream, 'center', { shadow: 3, spacing: 2 });
+  if (sub) uiText(c, sub, 0, 40, FSERIF(22, true), PAL.amber, 'center', { shadow: 2, spacing: 5 });
   c.restore();
 }
 // debug drip spawner: GAME.debugSpawn only, off in a normal run
@@ -1150,7 +1641,7 @@ function checkUnlocks() {
 const Opt = { hard: false };
 const hardUnlocked = () => unlocked('hardhabit');
 const hardMult = () => (G && G.hard ? CONFIG.HARD_MULT : 1);
-function hardPillRect() { return { x: (CONFIG.W - CONFIG.HARD_PILL_W) / 2, y: CONFIG.HARD_PILL_Y, w: CONFIG.HARD_PILL_W, h: CONFIG.HARD_PILL_H }; }
+function hardPillRect() { return { x: CONFIG.HARD_PILL_X, y: CONFIG.HARD_PILL_Y, w: CONFIG.HARD_PILL_W, h: CONFIG.HARD_PILL_H }; }
 
 // ---- the card screen (geometry and drawing lifted from the Designer's ui-scratch.html)
 function cardRect(i) {
@@ -1163,8 +1654,7 @@ function cardAt(mx, my) {
   return -1;
 }
 function drawCards(c, cards, hoverIndex, t) {
-  c.fillStyle = 'rgba(7,7,13,0.62)'; c.fillRect(0, 0, CONFIG.W, CONFIG.H);
-  FX.drawOverlays(c);
+  dim(c, 0.62); FX.vignette(c, 0.7);
   uiText(c, 'CHOOSE A BLESSING', CONFIG.W / 2, 74, FSANS(22), PAL.cream, 'center', { spacing: 6, shadow: 2 });
   c.fillStyle = PAL.amber; c.fillRect(CONFIG.W / 2 - 44, 88, 88, 2);
   for (let i = 0; i < cards.length; i++) {
@@ -1176,7 +1666,7 @@ function drawCards(c, cards, hoverIndex, t) {
     // seal: a wax circle with an ink cross
     const sx = x + cw / 2, sy = y + 66;
     ell(c, sx, sy + 3, 31, 31, 'rgba(0,0,0,0.45)');
-    ell(c, sx, sy, 31, 31, hov ? b.color : rgba(b.color, 0.85), PAL.outline, 2);
+    ell(c, sx, sy, 31, 31, hov ? b.color : rgba(b.color, 0.85), PAL.ink, 2);
     c.fillStyle = 'rgba(7,7,13,0.8)'; c.fillRect(sx - 4.5, sy - 22, 9, 42); c.fillRect(sx - 14, sy - 11, 28, 8);
     const nf = FSANS(19), nl = uiWrap(c, b.name, nf, cw - 34);
     nl.forEach((ln, k) => uiText(c, ln, sx, y + 135 + k * 24 - (nl.length - 1) * 6, nf, PAL.cream, 'center', { spacing: 1.5 }));
@@ -1198,6 +1688,7 @@ function newGame() {
     state: 'TITLE', t: 0, timeScale: 1, baseTimeScale: 1, slowmoT: 0, hitstop: 0,
     player: newPlayer(), enemies: [], pellets: [], casings: [], pickups: [], texts: [],
     wave: 0, score: 0, kills: 0, chain: 0, comboT: 0, shots: 0,
+    pendingShots: [], multPopT: 9, lastMult: 1, newBest: false,
     budget: 0, spent: 0, burstT: 0, telegraphs: [], waveCardT: 0, waveEndT: 0, winT: 0,
     bossWave: false, bossSpawned: false, bossDead: false, encore: false,
     debugSpawn: false, dummies: false, spawnT: 1.0, quote: '', overT: 0, nextId: 1,
@@ -1230,6 +1721,7 @@ function bankRun(win) {
   s.kills += Math.max(0, G.kills - G.bankedKills); G.bankedKills = G.kills;
   if (!G.bankedRun) { s.runs++; G.bankedRun = true; }
   if (win) s.wins++;
+  G.newBest = G.score > 0 && G.score > s.hi;
   if (G.score > s.hi) s.hi = G.score;
   if (G.wave > s.bestWave) s.bestWave = G.wave;
   Save.save();
@@ -1247,15 +1739,14 @@ function drawWorld(c) {
   drawGates(c);
   drawCasings(c);
   drawPickups(c);
-  // y-sorted bodies
+  // y-sorted bodies: everything is a pre-rendered blit, so the order is the only 3/4 cue we need
   const p = G.player;
   const bodies = G.enemies.slice(); bodies.push(p);
   bodies.sort((a, b) => a.y - b.y);
-  const gunBelow = p.aimY < 0;
   for (const b of bodies) {
     if (b === p) {
       if (p.iframes > 0 && Math.floor(p.iframes * 16) % 2 === 1) c.globalAlpha = 0.45;
-      if (gunBelow) drawGun(c, p); drawNun(c, p); if (!gunBelow) drawGun(c, p);
+      drawNunSprite(c, p);
       c.globalAlpha = 1;
     } else if (!b.dead) drawEnemy(c, b);
   }
@@ -1265,45 +1756,86 @@ function drawWorld(c) {
   drawTexts(c);
   c.restore();
 }
-function drawReticle(c) {
-  const p = G.player, m = Input.mouse;
-  const r = clamp(p.aimDist * Math.tan((p.stats.spread / 2) * Math.PI / 180), 6, 60);
-  const killRange = p.stats.pelletSpeed * p.stats.fullT + 12;
-  let hot = false;
-  for (const e of G.enemies) { const d = Math.hypot(e.x - p.x, e.y - p.y); if (d < killRange + e.r) { hot = true; break; } }
-  c.save();
-  c.strokeStyle = hot ? PAL.muzzle : 'rgba(244,240,230,0.55)'; c.lineWidth = hot ? 2.5 : 1.5;
-  c.beginPath(); c.arc(m.x, m.y, r, 0, TAU); c.stroke();
-  c.fillStyle = hot ? PAL.muzzle : 'rgba(244,240,230,0.7)'; c.fillRect(m.x - 1, m.y - 1, 2, 2);
+// the ring IS the spread: radius = distance * tan(half-angle), clamped. Solid amber inside kill
+// range, hollow dashed cream beyond. (ui-scratch.html, with the half-angle taken from the gun.)
+function drawReticle(c, x, y, dist, inRange, halfDeg) {
+  const r = clamp(dist * Math.tan(((halfDeg || 11) * Math.PI) / 180), 6, 60);
+  c.save(); c.translate(x, y); c.lineCap = 'round';
+  c.strokeStyle = 'rgba(7,7,13,0.55)'; c.lineWidth = inRange ? 4.5 : 3.5; c.beginPath(); c.arc(0, 0, r, 0, TAU); c.stroke();
+  if (inRange) {
+    c.strokeStyle = PAL.amber; c.lineWidth = 2.5; c.beginPath(); c.arc(0, 0, r, 0, TAU); c.stroke();
+    c.beginPath();
+    for (let i = 0; i < 4; i++) { const a = (i * Math.PI) / 2; c.moveTo(Math.cos(a) * (r - 7), Math.sin(a) * (r - 7)); c.lineTo(Math.cos(a) * (r + 5), Math.sin(a) * (r + 5)); }
+    c.stroke();
+    c.fillStyle = PAL.amber; c.beginPath(); c.arc(0, 0, 2.4, 0, TAU); c.fill();
+  } else {
+    c.strokeStyle = rgba(PAL.cream, 0.7); c.lineWidth = 1.5; c.setLineDash([7, 6]); c.beginPath(); c.arc(0, 0, r, 0, TAU); c.stroke(); c.setLineDash([]);
+    c.fillStyle = rgba(PAL.cream, 0.7); c.beginPath(); c.arc(0, 0, 1.8, 0, TAU); c.fill();
+  }
   c.restore();
 }
-function drawHUD(c) {
+function drawPlayerReticle(c) {
+  const p = G.player, m = Input.mouse;
+  const killRange = p.stats.pelletSpeed * p.stats.fullT + 12;
+  let hot = false;
+  for (const e of G.enemies) { if (e.dead) continue; const d = Math.hypot(e.x - p.x, e.y - p.y); if (d < killRange + e.r) { hot = true; break; } }
+  drawReticle(c, m.x, m.y, p.aimDist, hot, p.stats.spread / 2);
+}
+
+// HUD: plain data in, no game state (ui-scratch.html). Never leaves the 40 px bands top and bottom.
+function drawHUD(c, d) {
+  const W = CONFIG.W, H = CONFIG.H, t = d.t || 0;
+  // hearts, top-left
+  const hstep = 27, hx0 = 36;
+  pill(c, 14, 8, d.maxHp * hstep + 18, 32);
+  for (let i = 0; i < d.maxHp; i++) (i < d.hp ? drawHeart : drawHeartEmpty)(c, hx0 + i * hstep, 34, HUD_HEART_S);
+  // wave name, top-centre (+ boss bar)
+  const wf = FSANS(12), ww = uiMeasure(c, d.waveName, wf, 3);
+  const hasBoss = d.bossHp != null;
+  pill(c, W / 2 - Math.max(ww, 300) / 2 - 16, 8, Math.max(ww, 300) + 32, hasBoss ? 34 : 24);
+  uiText(c, d.waveName, W / 2, 25, wf, rgba(PAL.cream, 0.9), 'center', { spacing: 3 });
+  if (hasBoss) {
+    rrect(c, W / 2 - 150, 30, 300, 7, 3.5, PAL.ink, rgba(PAL.cream, 0.45), 1);
+    if (d.bossHp > 0) rrect(c, W / 2 - 149, 31, 298 * clamp01(d.bossHp), 5, 2.5, PAL.purple);
+    c.fillStyle = PAL.gold; c.fillRect(W / 2 - 150 + 298 * clamp01(d.bossHp) - 1, 29, 2, 9);
+  }
+  // score + multiplier + chain, top-right
+  const sf = FSANS(26), mf = FSANS(17), cf = FSANS(10);
+  const sc = fmt(d.score), sw = uiMeasure(c, sc, sf, 0);
+  const ms = 'x' + d.mult.toFixed(1), mw = uiMeasure(c, ms, mf, 0);
+  const cs = d.chain > 1 ? 'CHAIN ' + d.chain : '', cw = cs ? uiMeasure(c, cs, cf, 2) : 0;
+  const totalW = sw + 14 + mw + (cs ? cw + 14 : 0);
+  pill(c, W - 30 - totalW - 16, 8, totalW + 32, 32);
+  uiText(c, sc, W - 30, 34, sf, PAL.cream, 'right', { shadow: 1 });
+  const pop = 1 + 0.35 * (1 - clamp01((d.popT == null ? 9 : d.popT) / CONFIG.MULT_POP_T));
+  c.save(); c.translate(W - 30 - sw - 14 - mw / 2, 27); c.scale(pop, pop);
+  uiText(c, ms, 0, 6, mf, PAL.amber, 'center', { shadow: 1 }); c.restore();
+  if (cs) uiText(c, cs, W - 30 - sw - 14 - mw - 14, 30, cf, rgba(PAL.cream, 0.6), 'right', { spacing: 2 });
+  // shells + gun state, bottom-left
+  const pstep = 14, px0 = 32;
+  const stf = FSANS(10), stw = uiMeasure(c, d.gunState, stf, 2.5);
+  pill(c, 14, H - 40, d.maxShells * pstep + stw + 40, 32);
+  for (let i = 0; i < d.maxShells; i++) {
+    const x = px0 + i * pstep;
+    if (i < d.shells) drawShellPip(c, x, H - 13, HUD_PIP_S);
+    else {
+      drawShellPip(c, x, H - 13, HUD_PIP_S, true);
+      if (d.gunState === 'LOADING' && i === d.shells) { c.save(); c.globalAlpha = pulse(t, 2.5, 0.15, 0.75); drawShellPip(c, x, H - 13, HUD_PIP_S); c.restore(); }
+    }
+  }
+  const stc = d.gunState === 'READY' ? rgba(PAL.cream, 0.85) : d.gunState === 'PUMPING' ? PAL.amber : rgba(PAL.amber, pulse(t, 2.5, 0.5, 1));
+  uiText(c, d.gunState, px0 + d.maxShells * pstep + 6, H - 20, stf, stc, 'left', { spacing: 2.5 });
+}
+function hudData() {
   const p = G.player;
-  text(c, fmt(G.score), 28, 26, 22, PAL.cream, 'left');
-  const mult = comboMult() * encoreMult() * hardMult();
-  if (mult > 1.05) text(c, 'x' + mult.toFixed(1), 28 + c.measureText(fmt(G.score)).width + 14, 27, 16, PAL.gold, 'left');
-  // hearts
-  for (let i = 0; i < p.maxHp; i++) drawHeart(c, 32 + i * 22, 52, 8, i < p.hp ? PAL.bone : 'rgba(244,240,230,0.18)');
-  // shells
-  for (let i = 0; i < p.stats.shells; i++) {
-    c.fillStyle = i < p.gun.shells ? PAL.brass : 'rgba(217,164,65,0.18)';
-    c.fillRect(CONFIG.W - 36 - i * 12, 20, 8, 18);
-    if (i < p.gun.shells) { c.fillStyle = PAL.red; c.fillRect(CONFIG.W - 36 - i * 12, 20, 8, 5); }
-  }
-  if (p.gun.state === 'LOADING') { c.fillStyle = 'rgba(244,240,230,0.5)'; const frac = 1 - clamp(p.gun.timer / p.stats.shellT, 0, 1); c.fillRect(CONFIG.W - 36 - (p.stats.shells - 1) * 12, 42, (p.stats.shells * 12 - 4) * frac, 3); }
-  if (G.wave > 0) {
-    const sub = waveSub(G.wave);
-    text(c, waveName(G.wave) + (sub ? ' · ' + sub : ''), CONFIG.W / 2, 26, 14, 'rgba(244,240,230,0.7)');
-  }
-  // boss bar
   let boss = null;
   for (const e of G.enemies) if (e.def.boss && !e.dead) { boss = e; break; }
-  if (boss) {
-    const w = CONFIG.BOSS_BAR_W, x = (CONFIG.W - w) / 2, y = 44, h = 10;
-    c.fillStyle = 'rgba(0,0,0,0.5)'; c.fillRect(x - 2, y - 2, w + 4, h + 4);
-    c.fillStyle = PAL.purple; c.fillRect(x, y, w * clamp(boss.hp / boss.maxHp, 0, 1), h);
-    c.strokeStyle = PAL.gold; c.lineWidth = 2; c.strokeRect(x, y, w, h);
-  }
+  return {
+    hp: p.hp, maxHp: p.maxHp, shells: p.gun.shells, maxShells: p.stats.shells, gunState: p.gun.state,
+    score: G.score, mult: comboMult() * encoreMult() * hardMult(), chain: G.chain,
+    waveName: waveName(G.wave), bossHp: boss ? clamp01(boss.hp / boss.maxHp) : null,
+    t: RT, popT: G.multPopT,
+  };
 }
 
 STATES.TITLE = {
@@ -1317,24 +1849,42 @@ STATES.TITLE = {
     }
     if (Input.anyStart()) { startRun(); return; }
   },
+  // the poster (ui-scratch.html): torchlit courtyard, the dead at the gates, the hero at 4.6x
   draw(c) {
+    const W = CONFIG.W, t = RT;
     drawArena(c);
-    c.fillStyle = 'rgba(0,0,0,0.35)'; c.fillRect(0, 0, CONFIG.W, CONFIG.H);
-    text(c, 'GET THEE TO A NUNNERY', CONFIG.W / 2, 190, 60, PAL.cream, 'center', true);
-    text(c, 'She took the advice.', CONFIG.W / 2, 246, 26, PAL.amber, 'center', true);
-    text(c, 'WASD move · mouse aim · click to begin', CONFIG.W / 2, 330, 17, PAL.cream);
-    const s = Save.data;
-    text(c, 'BEST ' + fmt(s.hi) + ' · WAVE ' + (s.bestWave || 0), CONFIG.W / 2, 372, 15, 'rgba(244,240,230,0.7)');
+    drawGates(c);
+    dim(c, 0.42);
+    FX.vignette(c, 1);
+    // menace at the gates
+    c.save(); c.globalAlpha = 0.6;
+    drawYorick(c, 470, 512, 2.2, 0); drawYorick(c, 512, 500, 2.2, 1); drawYorick(c, 545, 516, 2.2, 0);
+    c.save(); c.translate(880, 175); c.scale(-1, 1); drawRestless(c, 0, 0, 2.4, 0); c.restore();
+    c.save(); c.translate(815, 128); c.scale(-1, 1); drawRestless(c, 0, 0, 2.4, 1); c.restore();
+    drawRestless(c, 905, 300, 2.4, 0);
+    drawYorick(c, 60, 470, 2.2, 1); drawYorick(c, 96, 456, 2.2, 0);
+    c.restore();
+    // hero
+    drawNunWithGun(c, 745, 476, 4.6, Math.PI - 0.55, 0.2);
+    // poster text
+    uiText(c, 'GET THEE TO', 72, 150, FSERIF(56), PAL.cream, 'left', { shadow: 3, spacing: 1 });
+    uiText(c, 'A NUNNERY', 68, 244, FSERIF(98), PAL.cream, 'left', { shadow: 4 });
+    rule(c, 72, 262, 380);
+    uiText(c, 'She took the advice.', 74, 302, FSERIF(28, true), PAL.amber, 'left', { shadow: 2 });
+    uiText(c, 'WASD MOVE   ·   MOUSE AIM   ·   CLICK TO BEGIN', 74, 350, FSANS(13), rgba(PAL.cream, pulse(t, 0.7, 0.5, 1)), 'left', { spacing: 2, shadow: 1 });
     if (hardUnlocked()) {
       const r = hardPillRect(), on = Opt.hard;
-      pill(c, r.x, r.y, r.w, r.h, 0.55);
-      if (on) rrect(c, r.x, r.y, r.w, r.h, Math.min(r.h / 2, 10), null, PAL.amber, 2);
-      keycap(c, r.x + 7, r.y + 6, 'H');
-      uiText(c, 'HARD HABIT', r.x + 40, r.y + 22, FSANS(14), on ? PAL.amber : PAL.cream, 'left', { spacing: 2.5 });
-      uiText(c, on ? 'ON' : 'OFF', r.x + r.w - 12, r.y + 22, FSANS(13), on ? PAL.amber : 'rgba(244,240,230,0.5)', 'right', { spacing: 2 });
+      pill(c, r.x, r.y, r.w, r.h, 0.45);
+      keycap(c, r.x + 8, r.y + 6, 'H');
+      uiText(c, 'HARD HABIT', r.x + 40, r.y + 23, FSANS(13), PAL.cream, 'left', { spacing: 2 });
+      uiText(c, on ? 'ON' : 'OFF', r.x + r.w - 12, r.y + 23, FSANS(13), on ? PAL.amber : rgba(PAL.cream, 0.45), 'right', { spacing: 2 });
     }
-    text(c, Audio.muted ? 'M unmute' : 'M mute', CONFIG.W - 24, CONFIG.H - 18, 12, 'rgba(244,240,230,0.5)', 'right');
-    FX.drawOverlays(c);
+    const s = Save.data;
+    uiText(c, 'BEST ' + fmt(s.hi) + '   ·   WAVE ' + (s.bestWave || 0), 72, 504, FSANS(14), rgba(PAL.cream, 0.85), 'left', { spacing: 1.5, shadow: 1 });
+    const mlab = Audio.muted ? 'MUTED' : 'MUTE';
+    const mw = uiMeasure(c, mlab, FSANS(12), 2);
+    keycap(c, W - 72 - mw - 30, 486, 'M', 20);
+    uiText(c, mlab, W - 72, 502, FSANS(12), Audio.muted ? PAL.amber : rgba(PAL.cream, 0.7), 'right', { spacing: 2 });
   },
 };
 
@@ -1352,15 +1902,19 @@ STATES.PLAYING = {
     updateTexts(dt);
     updateWaves(dt);
     updateSpawner(dt);
+    resolveShots(dt);
     if (G.waveCardT > 0) G.waveCardT -= dt;
     if (G.comboT > 0) { G.comboT -= dt; if (G.comboT <= 0) G.chain = 0; }
+    // the multiplier pops whenever it changes
+    const m = comboMult() * encoreMult() * hardMult();
+    if (Math.abs(m - G.lastMult) > 1e-6) { G.lastMult = m; G.multPopT = 0; } else G.multPopT += dt;
   },
   draw(c) {
     drawWorld(c);
     FX.drawOverlays(c);
-    drawHUD(c);
-    drawWaveCard(c);
-    drawReticle(c);
+    drawHUD(c, hudData());
+    if (G.waveCardT > 0) drawWaveCard(c, CONFIG.WAVE_CARD_T - G.waveCardT, waveName(G.wave), waveSub(G.wave));
+    drawPlayerReticle(c);
   },
 };
 
@@ -1388,18 +1942,72 @@ STATES.UPGRADE = {
   draw(c) {
     drawWorld(c);
     drawCards(c, G.cards, G.cardHover, G.cardT);
-    drawHUD(c);
+    drawHUD(c, hudData());
   },
 };
 
 // anything earned on this screen is announced here, once
+function newUnlockLine() { return G.newUnlocks && G.newUnlocks.length ? G.newUnlocks.join('  ·  ') : null; }
 function drawNewUnlocks(c, y) {
-  if (!G.newUnlocks || !G.newUnlocks.length) return;
-  G.newUnlocks.forEach((n, i) => {
-    const str = 'NEW BLESSING: ' + n, f = FSANS(15), w = uiMeasure(c, str, f, 3);
-    pill(c, CONFIG.W / 2 - w / 2 - 16, y + i * 34 - 17, w + 32, 26, 0.5);
-    uiText(c, str, CONFIG.W / 2, y + i * 34, f, PAL.amber, 'center', { spacing: 3 });
-  });
+  const n = newUnlockLine(); if (!n) return;
+  const str = 'NEW BLESSING:  ' + n, f = FSANS(15), w = uiMeasure(c, str, f, 3);
+  pill(c, CONFIG.W / 2 - w / 2 - 22, y - 17, w + 44, 34, 0.5);
+  ell(c, CONFIG.W / 2 - w / 2 - 8, y - 5, 4, 4, PAL.amber);
+  uiText(c, str, CONFIG.W / 2 + 6, y, f, PAL.amber, 'center', { spacing: 3 });
+}
+// GAME OVER (ui-scratch.html): the quote, then the score, then whatever the run unlocked
+function drawGameOver(c, t, d) {
+  const W = CONFIG.W;
+  dim(c, 0.72); FX.vignette(c, 0.8);
+  const qf = FSERIF(30, true), ql = uiWrap(c, '“' + d.quote + '”', qf, 760);
+  ql.forEach((ln, k) => uiText(c, ln, W / 2, 152 + k * 38, qf, PAL.cream, 'center', { shadow: 2 }));
+  const qy = 152 + (ql.length - 1) * 38;
+  rule(c, W / 2 - 44, qy + 24, 88);
+  uiText(c, 'SCORE', W / 2, qy + 66, FSANS(13), rgba(PAL.cream, 0.6), 'center', { spacing: 5 });
+  uiText(c, fmt(d.score), W / 2, qy + 126, FSANS(58), PAL.cream, 'center', { shadow: 3 });
+  uiText(c, 'BEST ' + fmt(d.best), W / 2, qy + 158, FSANS(14), rgba(PAL.cream, 0.7), 'center', { spacing: 3 });
+  if (d.isNewBest) {
+    const sw = uiMeasure(c, fmt(d.score), FSANS(58), 0);
+    c.save(); c.translate(W / 2 + sw / 2 + 84, qy + 100); c.rotate(-0.14);
+    const k = 1 + 0.05 * Math.sin(t * 7); c.scale(k, k);
+    c.strokeStyle = PAL.amber; c.lineWidth = 2.5; c.lineCap = 'round'; c.beginPath();
+    for (let i = 0; i < 8; i++) { const a = (i * TAU) / 8 + 0.2; c.moveTo(Math.cos(a) * 66, Math.sin(a) * 30); c.lineTo(Math.cos(a) * 80, Math.sin(a) * 40); }
+    c.stroke();
+    rrect(c, -60, -18, 120, 36, 6, PAL.amber, PAL.ink, 2);
+    uiText(c, 'NEW BEST', 0, 7, FSANS(16), PAL.ink, 'center', { spacing: 3 });
+    c.restore();
+  }
+  if (d.newUnlock) drawNewUnlocks(c, qy + 208);
+  uiText(c, 'CLICK TO RETRY', W / 2, 482, FSANS(13), rgba(PAL.cream, pulse(t, 0.7, 0.45, 1)), 'center', { spacing: 4 });
+}
+// WIN: confetti, the crown on the flagstones, and the line
+function drawCrown(c, x, y, s, rot) {
+  c.save(); c.translate(x, y); c.scale(s, s); c.rotate(rot || 0); c.lineJoin = 'miter';
+  c.beginPath(); c.moveTo(-5.5, 0); c.lineTo(-5.5, -6.5); c.lineTo(-2.8, -3); c.lineTo(0, -8); c.lineTo(2.8, -3); c.lineTo(5.5, -6.5); c.lineTo(5.5, 0); c.closePath();
+  c.fillStyle = PAL.gold; c.fill(); c.lineWidth = 1.6; c.strokeStyle = PAL.ink; c.stroke();
+  c.restore();
+}
+function drawWin(c, t, d) {
+  const W = CONFIG.W;
+  dim(c, 0.6); FX.vignette(c, 0.7);
+  // shifted 60 px right of the Designer's mock so a NEW BLESSING pill never lands on her
+  drawShadow(c, 760, 486, 14, 4);
+  drawCrown(c, 760, 484, 3.2, 0.35);
+  drawNunWithGun(c, 820, 488, 3, Math.PI - 1.05, 0);
+  rrect(c, W / 2 - 370, 160, 740, 152, 8, 'rgba(7,7,13,0.55)');
+  uiText(c, 'THE REST IS SILENCE.', W / 2, 226, FSERIF(56), PAL.cream, 'center', { shadow: 3, spacing: 1 });
+  rule(c, W / 2 - 44, 244, 88);
+  uiText(c, 'ENCORE?  CLICK   ·   ESC TO BOW', W / 2, 286, FSANS(14), rgba(PAL.cream, pulse(t, 0.7, 0.5, 1)), 'center', { spacing: 3 });
+  uiText(c, 'SCORE ' + fmt(d.score), W / 2, 372, FSANS(28), PAL.cream, 'center', { spacing: 2, shadow: 2 });
+  if (d.best != null) uiText(c, 'BEST ' + fmt(d.best), W / 2, 400, FSANS(14), rgba(PAL.cream, 0.7), 'center', { spacing: 3 });
+  if (d.newUnlock) drawNewUnlocks(c, 440);
+}
+function drawPause(c) {
+  const W = CONFIG.W, H = CONFIG.H;
+  dim(c, 0.6); FX.vignette(c, 0.5);
+  uiText(c, 'PAUSED', W / 2, H / 2 - 4, FSANS(40), PAL.cream, 'center', { spacing: 12, shadow: 3 });
+  rule(c, W / 2 - 44, H / 2 + 14, 88);
+  uiText(c, 'ESC OR P TO RESUME', W / 2, H / 2 + 48, FSANS(13), rgba(PAL.cream, 0.75), 'center', { spacing: 4 });
 }
 
 const QUOTES = ['Goodnight, sweet nun.', 'Alas, poor Ophelia.', 'Get thee BACK to a nunnery.', 'Frailty, thy name is three hearts.', 'Something is rotten in Denmark. Mostly you.', 'The rest is silence. Until you click.'];
@@ -1415,12 +2023,7 @@ STATES.GAMEOVER = {
   },
   draw(c) {
     drawWorld(c);
-    c.fillStyle = 'rgba(0,0,0,0.65)'; c.fillRect(0, 0, CONFIG.W, CONFIG.H);
-    text(c, 'SCORE ' + fmt(G.score), CONFIG.W / 2, 170, 44, PAL.cream);
-    text(c, 'BEST ' + fmt(Save.data.hi), CONFIG.W / 2, 216, 20, 'rgba(244,240,230,0.7)');
-    text(c, '“' + G.quote + '”', CONFIG.W / 2, 290, 30, PAL.amber, 'center', true);
-    drawNewUnlocks(c, 344);
-    text(c, 'click to retry', CONFIG.W / 2, 344 + (G.newUnlocks.length ? G.newUnlocks.length * 34 + 26 : 36), 17, PAL.cream);
+    drawGameOver(c, RT, { score: G.score, best: Save.data.hi, isNewBest: G.newBest, quote: G.quote, newUnlock: newUnlockLine() });
   },
 };
 
@@ -1439,11 +2042,7 @@ STATES.WIN = {
   },
   draw(c) {
     drawWorld(c);
-    c.fillStyle = 'rgba(0,0,0,0.6)'; c.fillRect(0, 0, CONFIG.W, CONFIG.H);
-    text(c, 'THE REST IS SILENCE.', CONFIG.W / 2, 220, 48, PAL.cream, 'center', true);
-    text(c, 'SCORE ' + fmt(G.score), CONFIG.W / 2, 280, 24, PAL.cream);
-    text(c, 'ENCORE? click · Esc to bow', CONFIG.W / 2, 340, 17, PAL.amber);
-    drawNewUnlocks(c, 396);
+    drawWin(c, RT, { score: G.score, best: Save.data.hi, newUnlock: newUnlockLine() });
   },
 };
 
@@ -1454,10 +2053,8 @@ STATES.PAUSED = {
   },
   draw(c) {
     drawWorld(c);
-    c.fillStyle = 'rgba(0,0,0,0.55)'; c.fillRect(0, 0, CONFIG.W, CONFIG.H);
-    text(c, 'PAUSED', CONFIG.W / 2, 250, 44, PAL.cream, 'center', true);
-    text(c, 'Esc to resume', CONFIG.W / 2, 300, 16, 'rgba(244,240,230,0.7)');
-    drawHUD(c);
+    drawPause(c);
+    drawHUD(c, hudData());
   },
 };
 
@@ -1598,6 +2195,7 @@ function frame(now) {
   let dt = (now - last) / 1000; last = now;
   if (!(dt > 0) || dt > CONFIG.DT_CLAMP) dt = Math.min(Math.max(dt, 0), CONFIG.DT_CLAMP);
   // fps
+  RT += dt;
   Perf._frames++; Perf._acc += dt; if (Perf._acc >= 0.5) { Perf.fps = Perf._frames / Perf._acc; Perf._frames = 0; Perf._acc = 0; }
   // render-time systems: shake, kick, flashes, slow-mo timer
   FX.tickRender(dt);
@@ -1621,7 +2219,7 @@ function frame(now) {
 function boot() {
   Save.load(); Audio.setMuted(Save.data.mute);
   G = newGame();
-  FX.prerender(); Floor.build(); resize();
+  FX.prerender(); buildSprites(); Floor.build(); resize();
   setState('TITLE');
   requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
 }
