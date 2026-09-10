@@ -29,18 +29,22 @@ const CONFIG = {
   HEARTS: 3, MAX_HEARTS: 5, IFRAMES: 1.0, HURT_SHOVE_PX: 60, HURT_SLOWMO: 0.25, HURT_SLOWMO_T: 0.2,
   // shotgun
   PELLETS: 8, SPREAD_DEG: 22, PELLET_SPEED: 1100, PELLET_LIFE: 0.22, PELLET_FULL_T: 0.13, PELLET_R: 2.5,
-  PUMP_T: 0.45, SHELLS: 4, SHELL_T: 0.35, PUMP_SFX_AT: 0.6,
+  PELLET_SPEED_JITTER: 0.08, // +/- per pellet: a spray, not a comb of parallel tracers
+  PUMP_T: 0.42, SHELLS: 4, SHELL_T: 0.35, PUMP_SFX_AT: 0.7, FIRE_BUFFER_T: 0.10,
   RECOIL_PX: 40, KNOCK_PX: 120, FLY_SPEED: 80, SPLAT_SPEED: 200, SPLAT_DMG: 3,
-  TRANSFER: 0.3, TRANSFER_DAMP: 0.9, CORPSE_TRANSFER: 0.6, // ripple: fliers hand on 30%, a dying body hands on 60%
+  TRANSFER: 0.3, TRANSFER_DAMP: 0.9, CORPSE_TRANSFER: 1.0, // ripple: fliers hand on 30%, a dying body hands on 100%
   MUZZLE_OFF: 30, GUN_LEN: 34,
   // camera and hitstop
-  SHAKE_FIRE_PX: 6, SHAKE_FIRE_T: 0.12, KICK_PX: 8, KICK_DECAY: 14,
-  HITSTOP_KILL: 2, HITSTOP_MULTI: 4, HITSTOP_CAP: 5, MULTI_KILLS: 3,
+  SHAKE_FIRE_PX: 9, SHAKE_FIRE_T: 0.12, KICK_PX: 8, KICK_DECAY: 14,
+  HITSTOP_KILL: 3, HITSTOP_MULTI: 4, HITSTOP_CAP: 5, MULTI_KILLS: 3,
   // score
   COMBO_T: 1.5, COMBO_STEP: 0.1, COMBO_MAX: 5,
   // budgets
   PARTICLES: 500, MAX_ENEMIES: 80, MAX_PELLETS: 120, MAX_TEXTS: 20, MAX_CASINGS: 40, MAX_PICKUPS: 30,
-  CHUNKS: 8, CONFETTI: 10,
+  CHUNKS: 8, CONFETTI: 10, CHUNK_DRAG: 0.94, CONFETTI_DRAG: 0.96, DECAL_ALPHA: 0.35,
+  // audio bus + the blast envelope (the one sound that has to be the loudest thing in the game)
+  COMP_THRESH: -8, COMP_RATIO: 4, COMP_ATTACK: 0.003, COMP_RELEASE: 0.12, COMP_KNEE: 6,
+  BLAST_NOISE_DUR: 0.30, BLAST_NOISE_SWEEP: 0.16, BLAST_SINE_DUR: 0.30, BLAST_SINE_PEAK: 1.3, BLAST_TRI_DUR: 0.26,
   // waves: budget 8+4n spent in bursts from the gates, one telegraph per burst
   WAVE_BASE: 8, WAVE_PER: 4, BOSS_WAVE: 10, WAVE_SPEED_PER: 0.03,
   BURSTS_PER_WAVE: 10, BURST_FIRST: 0.8, BURST_MIN: 2, BURST_MAX: 3,
@@ -168,7 +172,7 @@ const Audio = (() => {
   function build() {
     master = ac.createGain(); master.gain.value = muted ? 0 : MASTER;
     comp = ac.createDynamicsCompressor();
-    comp.threshold.value = -14; comp.ratio.value = 10; comp.attack.value = 0.003; comp.release.value = 0.12; comp.knee.value = 6;
+    comp.threshold.value = CONFIG.COMP_THRESH; comp.ratio.value = CONFIG.COMP_RATIO; comp.attack.value = CONFIG.COMP_ATTACK; comp.release.value = CONFIG.COMP_RELEASE; comp.knee.value = CONFIG.COMP_KNEE;
     shaper = ac.createWaveShaper(); shaper.curve = tanhCurve(); shaper.oversample = 'none';
     sfx = ac.createGain(); sfx.gain.value = 0.7; // headroom: only stacked blasts drive the shaper into grit
     sfx.connect(shaper); shaper.connect(comp); comp.connect(master); master.connect(ac.destination);
@@ -228,9 +232,9 @@ const Audio = (() => {
   S.blast = () => {
     const v = voice('blast'); if (!v) return; const t = ac.currentTime, j = jit();
     noiseBurst({ t, dur: 0.008, peak: 0.9 * v, type: 'highpass', f0: 3000, q: 0.7 });
-    noiseBurst({ t, dur: 0.26, sweep: 0.12, peak: 1.1 * v, type: 'bandpass', f0: 1800 * j, f1: 250 * j, q: 1.2 });
-    osc({ type: 'sine', f0: 120 * j, f1: 38 * j, sweep: 0.09, dur: 0.18, peak: 1.0 * v, t });
-    osc({ type: 'triangle', f0: 55 * j, f1: 45 * j, sweep: 0.1, dur: 0.14, peak: 0.5 * v, t });
+    noiseBurst({ t, dur: CONFIG.BLAST_NOISE_DUR, sweep: CONFIG.BLAST_NOISE_SWEEP, peak: 1.1 * v, type: 'bandpass', f0: 1800 * j, f1: 250 * j, q: 1.2 });
+    osc({ type: 'sine', f0: 120 * j, f1: 38 * j, sweep: 0.09, dur: CONFIG.BLAST_SINE_DUR, peak: CONFIG.BLAST_SINE_PEAK * v, t });
+    osc({ type: 'triangle', f0: 55 * j, f1: 45 * j, sweep: 0.1, dur: CONFIG.BLAST_TRI_DUR, peak: 0.5 * v, t });
     duck(0.08, 0.35);
   };
   // chk-chk: two filtered clicks 90 ms apart, the second lower = "ready"
@@ -474,7 +478,7 @@ function newPlayer() {
     aim: 0, aimX: 1, aimY: 0, aimDist: 100, facing: 1,
     hp: CONFIG.HEARTS, maxHp: CONFIG.HEARTS, iframes: 0, god: false,
     stretch: 0, gunKick: 0, gunSlide: 0, walkT: 0, moving: false,
-    gun: { state: 'READY', timer: 0, shells: CONFIG.SHELLS, pumped: false, holdBlock: true },
+    gun: { state: 'READY', timer: 0, shells: CONFIG.SHELLS, pumped: false, holdBlock: true, buffered: false },
     stats: {
       pellets: CONFIG.PELLETS, spread: CONFIG.SPREAD_DEG, pelletSpeed: CONFIG.PELLET_SPEED, pelletLife: CONFIG.PELLET_LIFE, fullT: CONFIG.PELLET_FULL_T,
       pumpT: CONFIG.PUMP_T, shells: CONFIG.SHELLS, shellT: CONFIG.SHELL_T, recoil: 1, knock: 1, pierce: 0, bounce: 0,
@@ -507,10 +511,12 @@ function updateGun(dt) {
   const p = G.player, g = p.gun, s = p.stats;
   // a button already held when PLAYING begins (title click, card pick) must not fire until released once
   if (!Input.mouse.down) g.holdBlock = false;
-  const wantFire = Input.mouse.justDown || (Input.mouse.down && !g.holdBlock);
+  // a tap in the last FIRE_BUFFER_T of the pump (or of the shell going in) is remembered and fires the instant the gun is ready
+  if (Input.mouse.justDown && g.state !== 'READY' && g.timer <= CONFIG.FIRE_BUFFER_T) g.buffered = true;
+  const wantFire = Input.mouse.justDown || (Input.mouse.down && !g.holdBlock) || g.buffered;
   if (g.state === 'READY') {
-    if (wantFire && g.shells > 0) fire();
-    else if (g.shells === 0 || (Input.pressed('KeyR') && g.shells < s.shells)) { g.state = 'LOADING'; g.timer = s.shellT; }
+    if (wantFire && g.shells > 0) fire(); // fire() eats the buffer, so a buffered tap can never double up with the hold
+    else { g.buffered = false; if (g.shells === 0 || (Input.pressed('KeyR') && g.shells < s.shells)) { g.state = 'LOADING'; g.timer = s.shellT; } }
   } else if (g.state === 'PUMPING') {
     g.timer -= dt;
     if (!g.pumped && g.timer <= s.pumpT * (1 - CONFIG.PUMP_SFX_AT)) { g.pumped = true; p.gunSlide = 5; Audio.pump(); }
@@ -528,15 +534,16 @@ function updateGun(dt) {
 const impulseFor = (px) => (px * (1 - CONFIG.FRICTION)) / CONFIG.TICK;
 function fire() {
   const p = G.player, g = p.gun, s = p.stats;
-  g.shells--; g.state = 'PUMPING'; g.timer = s.pumpT; g.pumped = false; G.shots++;
+  g.shells--; g.state = 'PUMPING'; g.timer = s.pumpT; g.pumped = false; g.buffered = false; G.shots++;
   const shot = { kills: 0, n: G.shots };
   const mx = p.x + p.aimX * CONFIG.MUZZLE_OFF, my = p.y - 1 + p.aimY * CONFIG.MUZZLE_OFF;
   const spread = (s.spread * Math.PI) / 180, n = s.pellets;
-  const age0 = CONFIG.MUZZLE_OFF / s.pelletSpeed; // life and damage falloff are measured from the nun, not the muzzle, so the range numbers hold
   for (let i = 0; i < n; i++) {
     if (G.pellets.length >= CONFIG.MAX_PELLETS) break;
     const a = p.aim - spread / 2 + (spread * (i + Math.random())) / n; // stratified: one pellet jittered inside each slot
-    G.pellets.push({ x: mx, y: my, px: mx, py: my, vx: Math.cos(a) * s.pelletSpeed, vy: Math.sin(a) * s.pelletSpeed, age: age0, life: s.pelletLife, full: s.fullT, r: CONFIG.PELLET_R, pierce: s.pierce, bounces: s.bounce, hit: [], shot });
+    const sp = s.pelletSpeed * (1 + rand(-CONFIG.PELLET_SPEED_JITTER, CONFIG.PELLET_SPEED_JITTER)); // a spray, not a comb of tracers
+    const age0 = CONFIG.MUZZLE_OFF / sp; // life and damage falloff are measured from the nun, not the muzzle, so the range numbers hold
+    G.pellets.push({ x: mx, y: my, px: mx, py: my, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, age: age0, life: s.pelletLife, full: s.fullT, r: CONFIG.PELLET_R, pierce: s.pierce, bounces: s.bounce, hit: [], shot });
   }
   // the nun is thrown backwards: every shot is a dodge
   const rv = impulseFor(CONFIG.RECOIL_PX) * s.recoil;
@@ -746,8 +753,9 @@ function killEnemy(e, shot) {
   // white pop, chunks along the knock, bone confetti, floor splat
   FX.pop(e.x, e.y, e.r);
   const ks = Math.hypot(e.kvx, e.kvy), dir = ks > 30 ? Math.atan2(e.kvy, e.kvx) : rand(TAU), arc = ks > 30 ? 1.6 : TAU;
-  FX.burst(e.x, e.y, CONFIG.CHUNKS, { angle: dir, arc, minSpeed: 120 + ks * 0.2, maxSpeed: 300 + ks * 0.4, minLife: 0.35, maxLife: 0.7, color: [def.color, def.shade, def.shade], minSize: 4, maxSize: 7, drag: 0.9 });
-  FX.burst(e.x, e.y, CONFIG.CONFETTI, { minSpeed: 60, maxSpeed: 240, minLife: 0.4, maxLife: 0.9, color: PAL.bone, minSize: 2, maxSize: 3.5, grav: 200, drag: 0.94 });
+  // chunks are shade tones only: live-enemy green in the air reads as another enemy in a crowd
+  FX.burst(e.x, e.y, CONFIG.CHUNKS, { angle: dir, arc, minSpeed: 120 + ks * 0.2, maxSpeed: 300 + ks * 0.4, minLife: 0.35, maxLife: 0.7, color: def.shade, minSize: 4, maxSize: 7, drag: CONFIG.CHUNK_DRAG });
+  FX.burst(e.x, e.y, CONFIG.CONFETTI, { minSpeed: 60, maxSpeed: 240, minLife: 0.4, maxLife: 0.9, color: PAL.bone, minSize: 2, maxSize: 3.5, grav: 200, drag: CONFIG.CONFETTI_DRAG });
   splatDecal(e.x, e.y, def.shade, e.r, dir, ks);
   Audio.death(e.mass);
   if (def.heartDrop && Math.random() < def.heartDrop) spawnPickup(e.x, e.y);
@@ -773,7 +781,7 @@ function wallSplat(e) {
 }
 function splatDecal(x, y, color, r, dir, speed) {
   Floor.stamp((fc) => {
-    fc.globalAlpha = 0.55; fc.fillStyle = color;
+    fc.globalAlpha = CONFIG.DECAL_ALPHA; fc.fillStyle = color;
     const stretch = 1 + Math.min(1.5, speed / 400);
     fc.beginPath(); fc.ellipse(x, y, r * 0.9 * stretch, r * 0.8, dir, 0, TAU); fc.fill();
     for (let i = 0; i < 5; i++) { const a = dir + rand(-0.9, 0.9), d = rand(r * 0.6, r * 1.6 * stretch); fc.beginPath(); fc.arc(x + Math.cos(a) * d, y + Math.sin(a) * d, rand(2, 4.5), 0, TAU); fc.fill(); }
