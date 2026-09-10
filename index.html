@@ -33,7 +33,7 @@ const CONFIG = {
   PUMP_T: 0.42, SHELLS: 4, SHELL_T: 0.35, PUMP_SFX_AT: 0.7, FIRE_BUFFER_T: 0.10,
   RECOIL_PX: 40, KNOCK_PX: 120, FLY_SPEED: 80, SPLAT_SPEED: 200, SPLAT_DMG: 3,
   TRANSFER: 0.3, TRANSFER_DAMP: 0.9, CORPSE_TRANSFER: 1.0, // ripple: fliers hand on 30%, a dying body hands on 100%
-  MUZZLE_OFF: 30, GUN_LEN: 34,
+  MUZZLE_OFF: 30, GUN_LEN: 34, GUN_SLIDE_PX: 5, SLIDE_K: 900, SLIDE_DAMP: 22, // the pump block: 5 px back, sprung forward
   // camera and hitstop
   SHAKE_FIRE_PX: 9, SHAKE_FIRE_T: 0.12, KICK_PX: 8, KICK_DECAY: 14,
   HITSTOP_KILL: 3, HITSTOP_MULTI: 4, HITSTOP_CAP: 5, MULTI_KILLS: 3,
@@ -54,6 +54,15 @@ const CONFIG = {
   PACK_MIN: 8, PACK_MAX: 12, PACK_SPREAD: 26, WOBBLE_AMP: 0.55, WOBBLE_FREQ: 6,
   WAVE_END_SLOWMO: 0.3, WAVE_END_T: 0.4, WAVE_CARD_T: 1.4, WAVE_BONUS: 100, ENCORE_STEP: 0.1,
   BOSS_WIN_SLOWMO: 0.22, BOSS_WIN_T: 1.2, BOSS_BAR_W: 420, RETRY_LOCK: 0.25,
+  // blessings (spec §7): every coefficient the ten cards move
+  BUCKSHOT_PELLETS: 3, SAWNOFF_SPREAD: 12, SAWNOFF_KNOCK: 1.5, SAWNOFF_LIFE: 0.8,
+  HAILMARY_SHELLS: 2, VESPERS_MULT: 0.75, WRATH_RECOIL: 1.6, GRACE_HEARTS: 1,
+  OLDTEST_PIERCE: 1, RICOCHET_BOUNCE: 1, LASTRITES_SHELLS: 2,
+  THUNDER_EVERY: 4, THUNDER_KNOCK: 2, THUNDER_SHAKE: 10,
+  CARDS_N: 3, CARD_W: 224, CARD_H: 286, CARD_GAP: 36, CARD_Y: 118, CARD_LIFT: 10,
+  // unlocks and HARD HABIT (spec §8)
+  UNLOCK_WAVE: 5, UNLOCK_KILLS: 500, UNLOCK_RUNS: 3, UNLOCK_WINS: 1,
+  HARD_WAVE: 4, HARD_HEARTS: 2, HARD_MULT: 1.5, HARD_PILL_W: 214, HARD_PILL_H: 34, HARD_PILL_Y: 402,
   // pickups
   HEART_HEAL: 1, HEART_R: 10, HEART_LIFE: 14, HEART_BLINK: 3,
   // debug drip spawner (GAME.debugSpawn only; the wave system owns the real spawns)
@@ -66,9 +75,12 @@ const PAL = {
   muzzle: '#fff3c4', cream: '#f4f0e6', purple: '#7b3fa0', gold: '#ffd166', brass: '#d9a441',
   black: '#111118', outline: '#0b0b12', skin: '#f1c9a5', red: '#c0392b', smoke: '#8a8fa8',
 };
-const FONT_SERIF = 'bold Georgia, "Times New Roman", serif';
-const FONT_SANS = 'bold -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif';
-const VERSION = '0.4.0-m4';
+const FAM_SERIF = 'Georgia, "Times New Roman", serif';
+const FAM_SANS = '-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif';
+// CSS shorthand wants the weight BEFORE the size, or the whole declaration is dropped
+const FSERIF = (px, italic) => (italic ? 'italic ' : '') + 'bold ' + px + 'px ' + FAM_SERIF;
+const FSANS = (px, regular) => (regular ? '' : 'bold ') + px + 'px ' + FAM_SANS;
+const VERSION = '0.5.0-m5';
 
 // ===================================================================== UTIL
 const TAU = Math.PI * 2;
@@ -80,11 +92,53 @@ const lerp = (a, b, t) => a + (b - a) * t;
 const fmt = (n) => Math.round(n || 0).toLocaleString('en-US');
 // normalise; zero-length vectors return a safe unit x so nothing ever goes NaN
 function norm(x, y) { const d = Math.hypot(x, y); return d > 1e-6 ? [x / d, y / d, d] : [1, 0, 0]; }
-function font(px, serif) { return px + 'px ' + (serif ? FONT_SERIF : FONT_SANS); }
+function font(px, serif) { return serif ? FSERIF(px) : FSANS(px); }
 function text(c, str, x, y, px, color, align = 'center', serif = false, base = 'middle') {
   c.font = font(px, serif); c.fillStyle = color; c.textAlign = align; c.textBaseline = base; c.fillText(str, x, y);
 }
 function makeCanvas(w, h) { const cv = document.createElement('canvas'); cv.width = w; cv.height = h; return cv; }
+
+// ---- UI primitives (lifted from the Designer's ui-scratch.html: rrect/ell/rgba + letter-spaced text)
+const rgba = (hex, a) => { const n = parseInt(hex.slice(1), 16); return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')'; };
+function rrect(c, x, y, w, h, r, fill, stroke, lw) {
+  c.beginPath(); c.roundRect(x, y, w, h, r);
+  if (fill) { c.fillStyle = fill; c.fill(); }
+  if (stroke) { c.lineWidth = lw || 2; c.strokeStyle = stroke; c.stroke(); }
+}
+function ell(c, x, y, rx, ry, fill, stroke, lw) {
+  c.beginPath(); c.ellipse(x, y, rx, ry, 0, 0, TAU);
+  if (fill) { c.fillStyle = fill; c.fill(); }
+  if (stroke) { c.lineWidth = lw || 2; c.strokeStyle = stroke; c.stroke(); }
+}
+// letter spacing is done by hand (per-glyph fillText) so it works everywhere; uiMeasure matches it
+function uiMeasure(c, str, f, spacing) { c.font = f; return c.measureText(str).width + (spacing || 0) * Math.max(0, str.length - 1); }
+// opts: { spacing, shadow (px offset, drawn in ink first), baseline }
+function uiText(c, str, x, y, f, color, align, opts) {
+  opts = opts || {};
+  const sp = opts.spacing || 0, w = uiMeasure(c, str, f, sp);
+  const sx = align === 'center' ? x - w / 2 : align === 'right' ? x - w : x;
+  c.font = f; c.textAlign = 'left'; c.textBaseline = opts.baseline || 'alphabetic';
+  const run = (d, col) => {
+    c.fillStyle = col; let cx = sx + d;
+    if (!sp) { c.fillText(str, cx, y + d); return; }
+    for (const ch of str) { c.fillText(ch, cx, y + d); cx += c.measureText(ch).width + sp; }
+  };
+  if (opts.shadow) run(opts.shadow, opts.shadowColor || PAL.outline);
+  run(0, color);
+  return w;
+}
+function uiWrap(c, str, f, maxW) {
+  c.font = f; const out = []; let cur = '';
+  for (const wd of str.split(' ')) { const tr = cur ? cur + ' ' + wd : wd; if (c.measureText(tr).width > maxW && cur) { out.push(cur); cur = wd; } else cur = tr; }
+  if (cur) out.push(cur); return out;
+}
+function pill(c, x, y, w, h, a) { rrect(c, x, y, w, h, Math.min(h / 2, 10), 'rgba(7,7,13,' + (a == null ? 0.55 : a) + ')'); }
+function keycap(c, x, y, ch, size) {
+  size = size || 22;
+  rrect(c, x, y + 2, size, size, 4, 'rgba(0,0,0,0.5)');
+  rrect(c, x, y, size, size, 4, '#22233a', rgba(PAL.cream, 0.55), 1.5);
+  uiText(c, ch, x + size / 2, y + size * 0.72, FSANS(Math.round(size * 0.55)), PAL.cream, 'center');
+}
 
 // canvas + letterbox viewport
 const canvas = document.getElementById('c');
@@ -265,6 +319,17 @@ const Audio = (() => {
     osc({ type: 'sine', f0: 70, f1: 45, dur: 0.12, peak: 0.6 * v, t: t + 0.05 });
     osc({ type: 'sine', f0: 70, f1: 45, dur: 0.12, peak: 0.5 * v, t: t + 0.3 });
   };
+  // the blessing lands: a detuned major chord, voices entering one after another
+  S.choir = () => {
+    const v = voice('choir'); if (!v) return; const t = ac.currentTime, root = 392;
+    const ratios = [1, 1.26, 1.5, 2];
+    for (let i = 0; i < ratios.length; i++) {
+      const t0 = t + i * 0.05, f = root * ratios[i];
+      osc({ type: 'sine', f0: f, dur: 1.2 - i * 0.1, peak: (0.26 - i * 0.04) * v, t: t0 });
+      osc({ type: 'triangle', f0: f * 1.004, dur: 1.0 - i * 0.1, peak: (0.09 - i * 0.015) * v, t: t0 });
+    }
+    duck(0.1, 0.9);
+  };
   S.bell = (mult = 1) => {
     const v = voice('bell'); if (!v) return; const t = ac.currentTime, f = 660 * mult;
     osc({ type: 'sine', f0: f, dur: 1.4, peak: 0.35 * v, t }); osc({ type: 'sine', f0: f * 2.01, dur: 0.9, peak: 0.15 * v, t }); osc({ type: 'sine', f0: f * 2.98, dur: 0.5, peak: 0.08 * v, t });
@@ -331,8 +396,11 @@ function drawGun(c, p) {
   c.fillStyle = '#6b3f23'; c.fillRect(-10, -2.5, 14, 5); c.strokeRect(-10, -2.5, 14, 5);
   // barrel
   c.fillStyle = '#2a2d3d'; c.fillRect(2, -2, CONFIG.GUN_LEN - 2, 4); c.strokeRect(2, -2, CONFIG.GUN_LEN - 2, 4);
-  // pump block slides back on the chk-chk
-  c.fillStyle = PAL.border; c.fillRect(12 - (p.gunSlide || 0), -3.2, 9, 6.4); c.strokeRect(12 - (p.gunSlide || 0), -3.2, 9, 6.4);
+  // pump block on a dark rail: the rail is exposed as the block travels, so 5 px reads at 1x
+  const slide = p.gunSlide || 0;
+  c.fillStyle = PAL.outline; c.fillRect(6, -3.6, 18, 7.2);
+  c.fillStyle = PAL.border; c.fillRect(12 - slide, -3.9, 10, 7.8); c.strokeRect(12 - slide, -3.9, 10, 7.8);
+  c.fillStyle = PAL.outline; c.fillRect(14.5 - slide, -3.9, 1.3, 7.8); c.fillRect(18 - slide, -3.9, 1.3, 7.8);
   c.restore();
 }
 
@@ -477,11 +545,12 @@ function newPlayer() {
     x: CONFIG.W / 2, y: CONFIG.H / 2, r: CONFIG.NUN_R, kvx: 0, kvy: 0,
     aim: 0, aimX: 1, aimY: 0, aimDist: 100, facing: 1,
     hp: CONFIG.HEARTS, maxHp: CONFIG.HEARTS, iframes: 0, god: false,
-    stretch: 0, gunKick: 0, gunSlide: 0, walkT: 0, moving: false,
+    stretch: 0, gunKick: 0, gunSlide: 0, gunSlideV: 0, walkT: 0, moving: false,
     gun: { state: 'READY', timer: 0, shells: CONFIG.SHELLS, pumped: false, holdBlock: true, buffered: false },
     stats: {
       pellets: CONFIG.PELLETS, spread: CONFIG.SPREAD_DEG, pelletSpeed: CONFIG.PELLET_SPEED, pelletLife: CONFIG.PELLET_LIFE, fullT: CONFIG.PELLET_FULL_T,
       pumpT: CONFIG.PUMP_T, shells: CONFIG.SHELLS, shellT: CONFIG.SHELL_T, recoil: 1, knock: 1, pierce: 0, bounce: 0,
+      lastRites: false, thunder: false,
     },
   };
 }
@@ -502,7 +571,10 @@ function updatePlayer(dt) {
   if (p.x < B) { p.x = B; if (p.kvx < 0) p.kvx = 0; } else if (p.x > CONFIG.W - B) { p.x = CONFIG.W - B; if (p.kvx > 0) p.kvx = 0; }
   if (p.y < B) { p.y = B; if (p.kvy < 0) p.kvy = 0; } else if (p.y > CONFIG.H - B) { p.y = CONFIG.H - B; if (p.kvy > 0) p.kvy = 0; }
   if (p.iframes > 0) p.iframes -= dt;
-  p.stretch *= 0.82; p.gunKick *= 0.78; p.gunSlide *= 0.8;
+  p.stretch *= 0.82; p.gunKick *= 0.78;
+  // the pump block is a spring, not a decay: it snaps back and overshoots forward, so the rack reads at 1x
+  p.gunSlideV += (-CONFIG.SLIDE_K * p.gunSlide - CONFIG.SLIDE_DAMP * p.gunSlideV) * dt;
+  p.gunSlide += p.gunSlideV * dt;
   updateGun(dt);
 }
 
@@ -519,13 +591,13 @@ function updateGun(dt) {
     else { g.buffered = false; if (g.shells === 0 || (Input.pressed('KeyR') && g.shells < s.shells)) { g.state = 'LOADING'; g.timer = s.shellT; } }
   } else if (g.state === 'PUMPING') {
     g.timer -= dt;
-    if (!g.pumped && g.timer <= s.pumpT * (1 - CONFIG.PUMP_SFX_AT)) { g.pumped = true; p.gunSlide = 5; Audio.pump(); }
+    if (!g.pumped && g.timer <= s.pumpT * (1 - CONFIG.PUMP_SFX_AT)) { g.pumped = true; p.gunSlide = CONFIG.GUN_SLIDE_PX; p.gunSlideV = 0; Audio.pump(); }
     if (g.timer <= 0) { if (g.shells === 0) { g.state = 'LOADING'; g.timer = s.shellT; } else g.state = 'READY'; }
   } else if (g.state === 'LOADING') {
     if (wantFire && g.shells > 0) { fire(); return; }
     g.timer -= dt;
     if (g.timer <= 0) {
-      g.shells++; p.gunSlide = 3; Audio.shellIn();
+      g.shells++; p.gunSlide = CONFIG.GUN_SLIDE_PX * 0.6; p.gunSlideV = 0; Audio.shellIn();
       if (g.shells >= s.shells) g.state = 'READY'; else g.timer = s.shellT;
     }
   }
@@ -535,7 +607,9 @@ const impulseFor = (px) => (px * (1 - CONFIG.FRICTION)) / CONFIG.TICK;
 function fire() {
   const p = G.player, g = p.gun, s = p.stats;
   g.shells--; g.state = 'PUMPING'; g.timer = s.pumpT; g.pumped = false; g.buffered = false; G.shots++;
-  const shot = { kills: 0, n: G.shots };
+  // THUNDERCLAP: every fourth shot hits twice as hard and shakes the courtyard
+  const thunder = !!s.thunder && G.shots % CONFIG.THUNDER_EVERY === 0;
+  const shot = { kills: 0, n: G.shots, knock: thunder ? CONFIG.THUNDER_KNOCK : 1 };
   const mx = p.x + p.aimX * CONFIG.MUZZLE_OFF, my = p.y - 1 + p.aimY * CONFIG.MUZZLE_OFF;
   const spread = (s.spread * Math.PI) / 180, n = s.pellets;
   for (let i = 0; i < n; i++) {
@@ -548,8 +622,8 @@ function fire() {
   // the nun is thrown backwards: every shot is a dodge
   const rv = impulseFor(CONFIG.RECOIL_PX) * s.recoil;
   p.kvx -= p.aimX * rv; p.kvy -= p.aimY * rv;
-  p.stretch = 1; p.gunKick = 6;
-  FX.shake(CONFIG.SHAKE_FIRE_PX, CONFIG.SHAKE_FIRE_T);
+  p.stretch = 1; p.gunKick = 6; p.gunSlide = CONFIG.GUN_SLIDE_PX; p.gunSlideV = 0;
+  FX.shake(thunder ? CONFIG.THUNDER_SHAKE : CONFIG.SHAKE_FIRE_PX, CONFIG.SHAKE_FIRE_T);
   FX.kick(-p.aimX * CONFIG.KICK_PX, -p.aimY * CONFIG.KICK_PX);
   FX.flash(mx, my, p.aim);
   FX.burst(mx, my, 3, { angle: p.aim, arc: 0.8, minSpeed: 40, maxSpeed: 90, minLife: 0.35, maxLife: 0.6, color: PAL.smoke, minSize: 4, maxSize: 7, drag: 0.9 });
@@ -729,7 +803,7 @@ function hitEnemy(e, b) {
   e.flash = 2; e.squash = 1; e.lastShot = b.shot;
   const [dx, dy] = norm(b.vx, b.vy);
   // per-pellet share of the displacement a full point-blank hit should produce
-  const kv = (impulseFor(CONFIG.KNOCK_PX) / CONFIG.PELLETS) * e.knock * G.player.stats.knock;
+  const kv = (impulseFor(CONFIG.KNOCK_PX) / CONFIG.PELLETS) * e.knock * G.player.stats.knock * ((b.shot && b.shot.knock) || 1);
   e.kvx += dx * kv; e.kvy += dy * kv;
   FX.burst(b.x, b.y, 3, { angle: Math.atan2(dy, dx), arc: 1.2, minSpeed: 80, maxSpeed: 220, minLife: 0.15, maxLife: 0.35, color: [e.def.shade, PAL.bone], minSize: 2, maxSize: 3.5 });
   Audio.hit();
@@ -749,7 +823,13 @@ function killEnemy(e, shot) {
   // hitstop in whole ticks: same-tick kills take the max, capped
   const hs = shot.kills >= CONFIG.MULTI_KILLS ? CONFIG.HITSTOP_MULTI : CONFIG.HITSTOP_KILL;
   G.hitstop = Math.min(CONFIG.HITSTOP_CAP, Math.max(G.hitstop, hs));
-  G.chain++; G.comboT = CONFIG.COMBO_T; G.score += Math.round(def.score * comboMult() * encoreMult()); G.kills++;
+  G.chain++; G.comboT = CONFIG.COMBO_T; G.score += Math.round(def.score * comboMult() * encoreMult() * hardMult()); G.kills++;
+  // LAST RITES: the kill that came out of the last shell puts two more in the tube
+  const pl = G.player;
+  if (pl.stats.lastRites && pl.gun.shells === 0 && pl.gun.state !== 'LOADING') {
+    pl.gun.shells = Math.min(pl.stats.shells, CONFIG.LASTRITES_SHELLS);
+    pl.gunSlide = CONFIG.GUN_SLIDE_PX; pl.gunSlideV = 0; Audio.shellIn();
+  }
   // white pop, chunks along the knock, bone confetti, floor splat
   FX.pop(e.x, e.y, e.r);
   const ks = Math.hypot(e.kvx, e.kvy), dir = ks > 30 ? Math.atan2(e.kvy, e.kvx) : rand(TAU), arc = ks > 30 ? 1.6 : TAU;
@@ -948,7 +1028,7 @@ function startWave(n) {
 }
 // budget spent and the courtyard empty: slow-mo, bell, cards
 function endWave() {
-  G.score += Math.round(G.wave * CONFIG.WAVE_BONUS * encoreMult());
+  G.score += Math.round(G.wave * CONFIG.WAVE_BONUS * encoreMult() * hardMult());
   G.waveEndT = CONFIG.WAVE_END_T; G.slowmoT = 0; G.timeScale = CONFIG.WAVE_END_SLOWMO;
 }
 function finishWave() { G.timeScale = G.baseTimeScale; Audio.bell(); setState('UPGRADE'); }
@@ -1009,7 +1089,107 @@ function updateSpawner(dt) {
 }
 
 // ===================================================================== BLESSINGS
-const BLESSINGS = []; // M5
+// Ten cards, names and lines verbatim from spec §7. Every coefficient lives in CONFIG.
+const BLESSINGS = [
+  { id: 'buckshot', name: 'HOLY BUCKSHOT', line: 'Three more pellets. Denser sermon.', max: 3, color: PAL.gold,
+    apply(p) { p.stats.pellets += CONFIG.BUCKSHOT_PELLETS; } },
+  { id: 'sawnoff', name: 'SAWN-OFF SERMON', line: 'Wider, harder, shorter. Get closer.', max: 1, color: PAL.cyan,
+    apply(p) { p.stats.spread += CONFIG.SAWNOFF_SPREAD; p.stats.knock *= CONFIG.SAWNOFF_KNOCK; p.stats.pelletLife *= CONFIG.SAWNOFF_LIFE; } },
+  { id: 'hailmary', name: 'HAIL MARY', line: 'Two more shells in the tube.', max: 2, color: PAL.brass,
+    apply(p) { p.stats.shells += CONFIG.HAILMARY_SHELLS; p.gun.shells = Math.min(p.stats.shells, p.gun.shells + CONFIG.HAILMARY_SHELLS); } },
+  { id: 'vespers', name: 'SPEEDY VESPERS', line: 'Pump and reload faster. Amen.', max: 2, color: PAL.amber,
+    apply(p) { p.stats.pumpT *= CONFIG.VESPERS_MULT; p.stats.shellT *= CONFIG.VESPERS_MULT; } },
+  { id: 'wrath', name: 'WRATH', line: 'Recoil throws you further. Fly.', max: 1, color: PAL.purple,
+    apply(p) { p.stats.recoil *= CONFIG.WRATH_RECOIL; } },
+  { id: 'grace', name: 'GRACE', line: 'One more heart. Fully healed.', max: Infinity, color: PAL.red,
+    apply(p) { p.maxHp = Math.min(CONFIG.MAX_HEARTS, p.maxHp + CONFIG.GRACE_HEARTS); p.hp = p.maxHp; } },
+  { id: 'oldtestament', name: 'OLD TESTAMENT', line: 'Pellets pass through one body.', max: 1, color: PAL.bone,
+    apply(p) { p.stats.pierce += CONFIG.OLDTEST_PIERCE; } },
+  { id: 'ricochet', name: 'RICOCHET PSALM', line: 'Pellets bounce off the walls.', max: 1, color: PAL.green,
+    apply(p) { p.stats.bounce += CONFIG.RICOCHET_BOUNCE; } },
+  { id: 'lastrites', name: 'LAST RITES', line: 'Last-shell kills reload two shells.', max: 1, color: PAL.muzzle,
+    apply(p) { p.stats.lastRites = true; } },
+  { id: 'thunderclap', name: 'THUNDERCLAP', line: 'Every fourth shot: double knockback.', max: 1, color: PAL.border,
+    apply(p) { p.stats.thunder = true; } },
+];
+// locked until earned (spec §8); 'hardhabit' is an unlock but not a card
+const LOCKED_BLESSINGS = ['wrath', 'ricochet', 'thunderclap'];
+const UNLOCK_NAMES = { wrath: 'WRATH', ricochet: 'RICOCHET PSALM', thunderclap: 'THUNDERCLAP', hardhabit: 'HARD HABIT' };
+function blessingById(id) { for (const b of BLESSINGS) if (b.id === id) return b; return null; }
+function unlocked(id) { const u = Save.data.unlocks; return !!u && u.indexOf(id) >= 0; }
+function unlockedPool() { return BLESSINGS.filter((b) => LOCKED_BLESSINGS.indexOf(b.id) < 0 || unlocked(b.id)); }
+function blessingStacks(id) { return (G.picks && G.picks[id]) || 0; }
+function eligibleBlessings() { return unlockedPool().filter((b) => blessingStacks(b.id) < b.max); }
+// three distinct eligible cards; GRACE is uncapped, so a drained pool still deals three valid cards (spec §14)
+function rollCards() {
+  const pool = eligibleBlessings(), out = [];
+  while (out.length < CONFIG.CARDS_N && pool.length) out.push(pool.splice(randi(pool.length), 1)[0]);
+  while (out.length < CONFIG.CARDS_N) out.push(blessingById('grace'));
+  return out;
+}
+function takeBlessing(b) {
+  if (!b) return false;
+  if (blessingStacks(b.id) >= b.max) return false; // caps hold even if something else deals a full card
+  G.picks[b.id] = blessingStacks(b.id) + 1;
+  b.apply(G.player);
+  return true;
+}
+// unlocks are checked against the saved record, announced once on the screen that earned them
+function checkUnlocks() {
+  const s = Save.data, out = [];
+  if (!Array.isArray(s.unlocks)) s.unlocks = [];
+  const add = (id) => { if (s.unlocks.indexOf(id) < 0) { s.unlocks.push(id); out.push(UNLOCK_NAMES[id] || id.toUpperCase()); } };
+  if (s.bestWave >= CONFIG.UNLOCK_WAVE) add('ricochet');
+  if (s.kills >= CONFIG.UNLOCK_KILLS) add('thunderclap');
+  if (s.runs >= CONFIG.UNLOCK_RUNS) add('wrath');
+  if (s.wins >= CONFIG.UNLOCK_WINS) add('hardhabit');
+  if (out.length) Save.save();
+  return out;
+}
+// HARD HABIT: a title toggle, not a saved preference. Start at wave 4 with two hearts for 1.5x score.
+const Opt = { hard: false };
+const hardUnlocked = () => unlocked('hardhabit');
+const hardMult = () => (G && G.hard ? CONFIG.HARD_MULT : 1);
+function hardPillRect() { return { x: (CONFIG.W - CONFIG.HARD_PILL_W) / 2, y: CONFIG.HARD_PILL_Y, w: CONFIG.HARD_PILL_W, h: CONFIG.HARD_PILL_H }; }
+
+// ---- the card screen (geometry and drawing lifted from the Designer's ui-scratch.html)
+function cardRect(i) {
+  const cw = CONFIG.CARD_W, gap = CONFIG.CARD_GAP;
+  const x0 = CONFIG.W / 2 - (CONFIG.CARDS_N * cw + (CONFIG.CARDS_N - 1) * gap) / 2;
+  return { x: x0 + i * (cw + gap), y: CONFIG.CARD_Y, w: cw, h: CONFIG.CARD_H };
+}
+function cardAt(mx, my) {
+  for (let i = 0; i < G.cards.length; i++) { const r = cardRect(i); if (mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h) return i; }
+  return -1;
+}
+function drawCards(c, cards, hoverIndex, t) {
+  c.fillStyle = 'rgba(7,7,13,0.62)'; c.fillRect(0, 0, CONFIG.W, CONFIG.H);
+  FX.drawOverlays(c);
+  uiText(c, 'CHOOSE A BLESSING', CONFIG.W / 2, 74, FSANS(22), PAL.cream, 'center', { spacing: 6, shadow: 2 });
+  c.fillStyle = PAL.amber; c.fillRect(CONFIG.W / 2 - 44, 88, 88, 2);
+  for (let i = 0; i < cards.length; i++) {
+    const b = cards[i], r = cardRect(i), hov = i === hoverIndex;
+    const cw = r.w, ch = r.h, x = r.x, y = r.y - (hov ? CONFIG.CARD_LIFT : 0);
+    rrect(c, x + 5, y + 9, cw, ch, 12, 'rgba(0,0,0,0.5)');
+    rrect(c, x, y, cw, ch, 12, hov ? '#1d1e33' : '#12131f', b.color, hov ? 4 : 3);
+    if (hov) rrect(c, x - 5, y - 5, cw + 10, ch + 10, 16, null, rgba(b.color, 0.35 + 0.15 * Math.sin(t * 5)), 3);
+    // seal: a wax circle with an ink cross
+    const sx = x + cw / 2, sy = y + 66;
+    ell(c, sx, sy + 3, 31, 31, 'rgba(0,0,0,0.45)');
+    ell(c, sx, sy, 31, 31, hov ? b.color : rgba(b.color, 0.85), PAL.outline, 2);
+    c.fillStyle = 'rgba(7,7,13,0.8)'; c.fillRect(sx - 4.5, sy - 22, 9, 42); c.fillRect(sx - 14, sy - 11, 28, 8);
+    const nf = FSANS(19), nl = uiWrap(c, b.name, nf, cw - 34);
+    nl.forEach((ln, k) => uiText(c, ln, sx, y + 135 + k * 24 - (nl.length - 1) * 6, nf, PAL.cream, 'center', { spacing: 1.5 }));
+    const lf = FSANS(15, true), ll = uiWrap(c, b.line, lf, cw - 44);
+    ll.forEach((ln, k) => uiText(c, ln, sx, y + 196 + k * 21, lf, rgba(PAL.cream, 0.85), 'center'));
+    // stack pips: only for the stackable cards
+    if (b.max > 1 && isFinite(b.max)) {
+      const st = blessingStacks(b.id);
+      for (let k = 0; k < b.max; k++) ell(c, sx + (k - (b.max - 1) / 2) * 18, y + 250, 5.5, 5.5, k < st ? b.color : 'rgba(7,7,13,0.6)', rgba(PAL.cream, 0.5), 1.5);
+    }
+    keycap(c, sx - 11, CONFIG.CARD_Y + ch + 16, String(i + 1));
+  }
+}
 
 // ===================================================================== STATES
 let G = null;
@@ -1022,6 +1202,7 @@ function newGame() {
     bossWave: false, bossSpawned: false, bossDead: false, encore: false,
     debugSpawn: false, dummies: false, spawnT: 1.0, quote: '', overT: 0, nextId: 1,
     bankedKills: 0, bankedRun: false,
+    picks: {}, cards: [], cardHover: -1, cardT: 0, newUnlocks: [], hard: false,
   };
 }
 const STATES = {};
@@ -1036,7 +1217,10 @@ function startRun() {
   const keepDebug = G ? G.debugSpawn : false; const keepTS = G ? G.baseTimeScale : 1;
   G = newGame(); G.debugSpawn = keepDebug; G.baseTimeScale = keepTS; G.timeScale = keepTS;
   FX.reset(); Floor.build();
-  startWave(1);
+  // HARD HABIT: straight in at wave 4 on two hearts, and every point is worth half again as much
+  G.hard = Opt.hard && hardUnlocked();
+  if (G.hard) { G.player.maxHp = CONFIG.HARD_HEARTS; G.player.hp = CONFIG.HARD_HEARTS; }
+  startWave(G.hard ? CONFIG.HARD_WAVE : 1);
   setState('PLAYING');
 }
 function onFocusLost() { if (G && G.state === 'PLAYING') setState('PAUSED'); }
@@ -1049,6 +1233,7 @@ function bankRun(win) {
   if (G.score > s.hi) s.hi = G.score;
   if (G.wave > s.bestWave) s.bestWave = G.wave;
   Save.save();
+  G.newUnlocks = checkUnlocks();
 }
 
 function drawArena(c) {
@@ -1095,7 +1280,7 @@ function drawReticle(c) {
 function drawHUD(c) {
   const p = G.player;
   text(c, fmt(G.score), 28, 26, 22, PAL.cream, 'left');
-  const mult = comboMult() * encoreMult();
+  const mult = comboMult() * encoreMult() * hardMult();
   if (mult > 1.05) text(c, 'x' + mult.toFixed(1), 28 + c.measureText(fmt(G.score)).width + 14, 27, 16, PAL.gold, 'left');
   // hearts
   for (let i = 0; i < p.maxHp; i++) drawHeart(c, 32 + i * 22, 52, 8, i < p.hp ? PAL.bone : 'rgba(244,240,230,0.18)');
@@ -1124,6 +1309,12 @@ function drawHUD(c) {
 STATES.TITLE = {
   enter() { Input.endTick(); },
   update() {
+    // the HARD HABIT pill eats its own click, so the toggle never starts a run by accident
+    if (hardUnlocked()) {
+      const r = hardPillRect(), m = Input.mouse;
+      const onPill = m.x >= r.x && m.x <= r.x + r.w && m.y >= r.y && m.y <= r.y + r.h;
+      if (Input.pressed('KeyH') || (m.justDown && onPill)) { Opt.hard = !Opt.hard; Audio.click(); return; }
+    }
     if (Input.anyStart()) { startRun(); return; }
   },
   draw(c) {
@@ -1134,6 +1325,14 @@ STATES.TITLE = {
     text(c, 'WASD move · mouse aim · click to begin', CONFIG.W / 2, 330, 17, PAL.cream);
     const s = Save.data;
     text(c, 'BEST ' + fmt(s.hi) + ' · WAVE ' + (s.bestWave || 0), CONFIG.W / 2, 372, 15, 'rgba(244,240,230,0.7)');
+    if (hardUnlocked()) {
+      const r = hardPillRect(), on = Opt.hard;
+      pill(c, r.x, r.y, r.w, r.h, 0.55);
+      if (on) rrect(c, r.x, r.y, r.w, r.h, Math.min(r.h / 2, 10), null, PAL.amber, 2);
+      keycap(c, r.x + 7, r.y + 6, 'H');
+      uiText(c, 'HARD HABIT', r.x + 40, r.y + 22, FSANS(14), on ? PAL.amber : PAL.cream, 'left', { spacing: 2.5 });
+      uiText(c, on ? 'ON' : 'OFF', r.x + r.w - 12, r.y + 22, FSANS(13), on ? PAL.amber : 'rgba(244,240,230,0.5)', 'right', { spacing: 2 });
+    }
     text(c, Audio.muted ? 'M unmute' : 'M mute', CONFIG.W - 24, CONFIG.H - 18, 12, 'rgba(244,240,230,0.5)', 'right');
     FX.drawOverlays(c);
   },
@@ -1165,27 +1364,43 @@ STATES.PLAYING = {
   },
 };
 
-// M5 fills in the three real cards; for now any pick just advances the wave.
+// three cards over the dimmed, frozen arena: hover with the mouse, pick with a click or 1/2/3
+function chooseCard(i) {
+  if (G.state !== 'UPGRADE' || !(i >= 0 && i < G.cards.length)) return false;
+  takeBlessing(G.cards[i]);
+  Audio.choir();
+  startWave(G.wave + 1);
+  setState('PLAYING');
+  return true;
+}
 STATES.UPGRADE = {
-  enter() { Input.endTick(); },
-  update() {
-    if (Input.mouse.justDown || Input.pressed('Digit1') || Input.pressed('Digit2') || Input.pressed('Digit3') || Input.pressed('Enter') || Input.pressed('Space')) {
-      startWave(G.wave + 1); setState('PLAYING');
-    }
+  enter() { Input.endTick(); G.cards = rollCards(); G.cardHover = -1; G.cardT = 0; },
+  update(dt) {
+    G.cardT += dt;
+    G.cardHover = cardAt(Input.mouse.x, Input.mouse.y);
+    let choice = -1;
+    if (Input.pressed('Digit1')) choice = 0;
+    else if (Input.pressed('Digit2')) choice = 1;
+    else if (Input.pressed('Digit3')) choice = 2;
+    else if (Input.mouse.justDown && G.cardHover >= 0) choice = G.cardHover;
+    if (choice >= 0) chooseCard(choice);
   },
   draw(c) {
     drawWorld(c);
-    c.fillStyle = 'rgba(0,0,0,0.6)'; c.fillRect(0, 0, CONFIG.W, CONFIG.H);
-    text(c, 'BLESSINGS', CONFIG.W / 2, 150, 40, PAL.cream, 'center', true);
-    for (let i = 0; i < 3; i++) {
-      const x = CONFIG.W / 2 + (i - 1) * 240 - 100;
-      c.strokeStyle = PAL.gold; c.lineWidth = 3; c.strokeRect(x, 210, 200, 150);
-      text(c, String(i + 1), x + 100, 285, 40, PAL.cream);
-    }
-    text(c, 'click to continue', CONFIG.W / 2, 420, 16, 'rgba(244,240,230,0.7)');
+    drawCards(c, G.cards, G.cardHover, G.cardT);
     drawHUD(c);
   },
 };
+
+// anything earned on this screen is announced here, once
+function drawNewUnlocks(c, y) {
+  if (!G.newUnlocks || !G.newUnlocks.length) return;
+  G.newUnlocks.forEach((n, i) => {
+    const str = 'NEW BLESSING: ' + n, f = FSANS(15), w = uiMeasure(c, str, f, 3);
+    pill(c, CONFIG.W / 2 - w / 2 - 16, y + i * 34 - 17, w + 32, 26, 0.5);
+    uiText(c, str, CONFIG.W / 2, y + i * 34, f, PAL.amber, 'center', { spacing: 3 });
+  });
+}
 
 const QUOTES = ['Goodnight, sweet nun.', 'Alas, poor Ophelia.', 'Get thee BACK to a nunnery.', 'Frailty, thy name is three hearts.', 'Something is rotten in Denmark. Mostly you.', 'The rest is silence. Until you click.'];
 STATES.GAMEOVER = {
@@ -1204,7 +1419,8 @@ STATES.GAMEOVER = {
     text(c, 'SCORE ' + fmt(G.score), CONFIG.W / 2, 170, 44, PAL.cream);
     text(c, 'BEST ' + fmt(Save.data.hi), CONFIG.W / 2, 216, 20, 'rgba(244,240,230,0.7)');
     text(c, '“' + G.quote + '”', CONFIG.W / 2, 290, 30, PAL.amber, 'center', true);
-    text(c, 'click to retry', CONFIG.W / 2, 380, 17, PAL.cream);
+    drawNewUnlocks(c, 344);
+    text(c, 'click to retry', CONFIG.W / 2, 344 + (G.newUnlocks.length ? G.newUnlocks.length * 34 + 26 : 36), 17, PAL.cream);
   },
 };
 
@@ -1227,6 +1443,7 @@ STATES.WIN = {
     text(c, 'THE REST IS SILENCE.', CONFIG.W / 2, 220, 48, PAL.cream, 'center', true);
     text(c, 'SCORE ' + fmt(G.score), CONFIG.W / 2, 280, 24, PAL.cream);
     text(c, 'ENCORE? click · Esc to bow', CONFIG.W / 2, 340, 17, PAL.amber);
+    drawNewUnlocks(c, 396);
   },
 };
 
@@ -1305,7 +1522,7 @@ const GAME = {
   get telegraphs() { return G.telegraphs.length; },
   get pickups() { return G.pickups.length; },
   get encore() { return G.wave > CONFIG.BOSS_WAVE; },
-  get multiplier() { return comboMult() * encoreMult(); },
+  get multiplier() { return comboMult() * encoreMult() * hardMult(); },
   get bossHp() { for (const e of G.enemies) if (e.def.boss && !e.dead) return e.hp; return 0; },
   get version() { return VERSION; },
   get player() { const p = G.player; return { x: p.x, y: p.y, aim: p.aim, kvx: p.kvx, kvy: p.kvy, gun: p.gun.state, shells: p.gun.shells, hp: p.hp, god: p.god }; },
@@ -1326,6 +1543,19 @@ const GAME = {
   spawnAt(type, x, y, hp) { const e = spawnEnemy(type || 'restless', +x, +y); if (e && hp > 0) e.hp = e.maxHp = +hp; return e ? e.id : 0; },
   killAll() { const shot = { kills: 0 }; for (const e of G.enemies.slice()) if (!e.dead) killEnemy(e, shot); return G.enemies.length; },
   forceCards() { if (G.state === 'PLAYING' || G.state === 'PAUSED') setState('UPGRADE'); return G.state; },
+  get cards() { return G.cards.map((b) => b.id); },
+  get cardNames() { return G.cards.map((b) => b.name); },
+  get picks() { return Object.assign({}, G.picks); },
+  get stats() { return Object.assign({}, G.player.stats); },
+  get unlocks() { return (Save.data.unlocks || []).slice(); },
+  get newUnlocks() { return (G.newUnlocks || []).slice(); },
+  get hard() { return G.hard; },
+  get hardArmed() { return Opt.hard; },
+  get hardUnlocked() { return hardUnlocked(); },
+  pickCard(i) { return chooseCard(i | 0); },
+  hoverCard(i) { G.cardHover = i | 0; return G.cardHover; },
+  unlock(id) { const s = Save.data; if (!Array.isArray(s.unlocks)) s.unlocks = []; if (s.unlocks.indexOf(id) < 0) s.unlocks.push(id); Save.save(); return s.unlocks.slice(); },
+  setHard(b) { Opt.hard = !!b; return Opt.hard; },
   setGod(b) { G.player.god = !!b; return G.player.god; },
   setTimeScale(x) { G.baseTimeScale = clamp(+x || 0, 0, 4); if (G.slowmoT <= 0) G.timeScale = G.baseTimeScale; return G.timeScale; },
   snapshot() {
@@ -1335,7 +1565,8 @@ const GAME = {
       particleCount: FX.alive(), fps: Perf.fps, frameMs: Perf.frameMs, timeScale: G.timeScale, god: G.player.god, hiScore: Save.data.hi,
       combo: comboMult(), chain: G.chain, kills: G.kills, hitstop: G.hitstop, version: VERSION,
       budget: G.budget, spent: G.spent, telegraphs: G.telegraphs.length, pickups: G.pickups.length,
-      bossHp: GAME.bossHp, encore: G.wave > CONFIG.BOSS_WAVE, multiplier: comboMult() * encoreMult(),
+      bossHp: GAME.bossHp, encore: G.wave > CONFIG.BOSS_WAVE, multiplier: comboMult() * encoreMult() * hardMult(),
+      cards: G.cards.map((b) => b.id), picks: Object.assign({}, G.picks), unlocks: (Save.data.unlocks || []).slice(), hard: G.hard,
       player: { x: G.player.x, y: G.player.y, aim: G.player.aim }, audio: Audio.running, muted: Audio.muted,
     };
   },
