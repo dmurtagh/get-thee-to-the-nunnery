@@ -47,13 +47,16 @@ const CONFIG = {
   // audio bus + the blast envelope (the one sound that has to be the loudest thing in the game)
   COMP_THRESH: -8, COMP_RATIO: 4, COMP_ATTACK: 0.003, COMP_RELEASE: 0.12, COMP_KNEE: 6,
   BLAST_NOISE_DUR: 0.30, BLAST_NOISE_SWEEP: 0.16, BLAST_SINE_DUR: 0.30, BLAST_SINE_PEAK: 1.3, BLAST_TRI_DUR: 0.26,
-  // waves: budget 8+4n spent in bursts from the gates, one telegraph per burst
-  WAVE_BASE: 8, WAVE_PER: 4, BOSS_WAVE: 10, WAVE_SPEED_PER: 0.03,
-  BURSTS_PER_WAVE: 10, BURST_FIRST: 0.8, BURST_MIN: 2, BURST_MAX: 3,
+  // waves: budget spent in bursts from the gates, one telegraph per burst.
+  // The burst CAP is what makes wave 1 a warm-up: it starts at one body and grows both with the
+  // wave number and with how much of the current wave has already come through the gates.
+  WAVE_BASE: 3, WAVE_PER: 5, BOSS_WAVE: 10, WAVE_SPEED_PER: 0.035,
+  BURSTS_PER_WAVE: 8, BURST_MIN_PTS: 2, BURST_CAP_BASE: 1, BURST_CAP_PER: 1.2, BURST_CAP_RAMP: 2,
+  BURST_FIRST: 2.0, BURST_FIRST_STEP: 0.25, BURST_FIRST_MIN: 0.8, BURST_MIN: 2, BURST_MAX: 3,
   TELEGRAPH_T: 0.5, GATE_IN: 34, GATE_JITTER: 16, BOSS_GATE_IN: 74,
-  COST_RESTLESS: 1, COST_YORICK_PACK: 3, COST_GRAVEDIGGER: 6, COST_GHOST: 5,
+  COST_RESTLESS: 1, COST_YORICK_PACK: 4, COST_GRAVEDIGGER: 6, COST_GHOST: 5,
   WAVE_YORICK: 3, WAVE_GRAVEDIGGER: 5, WAVE_GHOST: 6,
-  PACK_MIN: 8, PACK_MAX: 12, PACK_SPREAD: 26, WOBBLE_AMP: 0.55, WOBBLE_FREQ: 6,
+  PACK_MIN: 8, PACK_MAX: 12, PACK_GROW: 1, PACK_SPAN: 2, PACK_SPREAD: 26, WOBBLE_AMP: 0.55, WOBBLE_FREQ: 6,
   WAVE_END_SLOWMO: 0.3, WAVE_END_T: 0.4, WAVE_CARD_T: 2.0, WAVE_BONUS: 100, ENCORE_STEP: 0.1,
   BOSS_WIN_SLOWMO: 0.22, BOSS_WIN_T: 1.2, RETRY_LOCK: 0.25,
   // blessings (spec §7): every coefficient the ten cards move
@@ -77,7 +80,7 @@ const CONFIG = {
   // low-HP heartbeat (juice §13.15) and the wave-card slam
   HEARTBEAT_HP: 1, HEARTBEAT_T: 1.05, LOWHP_VIG: 0.16, WAVE_SLAM_SHAKE: 4, WAVE_SLAM_BELL: 0.5,
   // pickups
-  HEART_HEAL: 1, HEART_R: 10, HEART_LIFE: 14, HEART_BLINK: 3,
+  HEART_HEAL: 1, HEART_R: 10, HEART_LIFE: 14, HEART_BLINK: 3, HEART_DROP: 0.25,
   // debug drip spawner (GAME.debugSpawn only; the wave system owns the real spawns)
   SPAWN_EVERY: 2, SPAWN_N: 2,
 };
@@ -103,7 +106,7 @@ const FAM_SANS = '-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Aria
 // CSS shorthand wants the weight BEFORE the size, or the whole declaration is dropped
 const FSERIF = (px, italic) => (italic ? 'italic ' : '') + 'bold ' + px + 'px ' + FAM_SERIF;
 const FSANS = (px, regular) => (regular ? '' : 'bold ') + px + 'px ' + FAM_SANS;
-const VERSION = '0.7.0-m7';
+const VERSION = '1.0.0-m8';
 
 // ===================================================================== UTIL
 const TAU = Math.PI * 2;
@@ -390,6 +393,16 @@ const Audio = (() => {
     noiseBurst({ t, dur: 0.14, peak: 0.18 * v, type: 'lowpass', f0: 160, f1: 60, q: 1 });
     osc({ type: 'sine', f0: 78, f1: 42, sweep: 0.1, dur: 0.17, peak: 0.55 * v, t });
     osc({ type: 'sine', f0: 70, f1: 38, sweep: 0.1, dur: 0.15, peak: 0.34 * v, t: t + 0.22 });
+  };
+  // spec §12: descending organ, slow bell
+  S.gameover = () => {
+    const v = voice('gameover'); if (!v) return; const t = ac.currentTime;
+    for (const f of [220, 165, 110]) {
+      osc({ type: 'sawtooth', f0: f, f1: f * 0.5, sweep: 1.1, dur: 1.4, peak: 0.2 * v, t });
+      osc({ type: 'sawtooth', f0: f * 1.01, f1: f * 0.505, sweep: 1.1, dur: 1.4, peak: 0.16 * v, t });
+    }
+    osc({ type: 'sine', f0: 165, dur: 2.2, peak: 0.3 * v, t: t + 0.35 });
+    osc({ type: 'sine', f0: 331, dur: 1.4, peak: 0.12 * v, t: t + 0.35 });
   };
   S.bell = (mult = 1) => {
     const v = voice('bell'); if (!v) return; const t = ac.currentTime, f = 660 * mult;
@@ -1301,7 +1314,7 @@ function stampCasing(k) {
 const ENEMY_DEFS = {
   restless: { hp: 3, speed: 90, r: 12, mass: 1, knock: 1, lunge: { range: 90, speed: 300 }, score: 10, color: PAL.green, shade: PAL.greenShade },
   yorick: { hp: 1, speed: 140, r: 7, mass: 0.5, knock: 1, wobble: true, score: 5, color: PAL.bone, shade: PAL.boneShade },
-  gravedigger: { hp: 14, speed: 60, r: 24, mass: 4, knock: 0.3, heartDrop: 0.3, score: 50, color: PAL.greyGreen, shade: PAL.greyGreenShade },
+  gravedigger: { hp: 14, speed: 60, r: 24, mass: 4, knock: 0.3, heartDrop: CONFIG.HEART_DROP, score: 50, color: PAL.greyGreen, shade: PAL.greyGreenShade },
   claudius: { hp: 80, speed: 45, r: 36, mass: 8, knock: 0.1, spawnYoricks: { every: 4, n: 6 }, score: 500, boss: true, color: PAL.purple, shade: PAL.purpleShade },
   // the Ghost walks in on the border point behind the player's aim, drifts through the crowd
   // (no separation, no knockback) and dissolves upward instead of coming apart.
@@ -1621,13 +1634,28 @@ function spawnGhost() {
   }
   return e;
 }
+// how many points one burst may spend: the wave's share, capped by a ceiling that opens up as the
+// wave number rises AND as this wave empties its budget. Wave 1 therefore arrives 1, 1, 2, 2 — a
+// warm-up that builds — while wave 5+ is limited only by its share and plays exactly as before.
+function burstPoints(n, spent, budget) {
+  const target = Math.max(CONFIG.BURST_MIN_PTS, Math.round(budget / CONFIG.BURSTS_PER_WAVE));
+  const frac = budget > 0 ? clamp(spent / budget, 0, 1) : 1;
+  const cap = Math.round(CONFIG.BURST_CAP_BASE + CONFIG.BURST_CAP_PER * (n - 1) + CONFIG.BURST_CAP_RAMP * frac);
+  return Math.max(1, Math.min(target, cap));
+}
+// the first burst of a wave waits longer on the early waves, so the wave card lands in silence
+const burstFirst = (n) => Math.max(CONFIG.BURST_FIRST_MIN, CONFIG.BURST_FIRST - CONFIG.BURST_FIRST_STEP * (n - 1));
 function planBurst(n, left) {
-  const points = Math.max(2, Math.ceil(waveBudget(n) / CONFIG.BURSTS_PER_WAVE));
+  const points = burstPoints(n, G.spent, G.budget);
   const list = []; let spent = 0;
   while (spent < points && spent < left) {
     const opts = payloadOptions(n).filter((o) => o.cost <= left - spent);
     if (!opts.length) break;
-    const o = pick(opts); list.push(o.kind); spent += o.cost;
+    // weighted by 1/cost: a burst is mostly bodies, and the expensive payloads stay occasional
+    let tw = 0; for (const o of opts) tw += 1 / o.cost;
+    let r = Math.random() * tw, o = opts[opts.length - 1];
+    for (const c of opts) { r -= 1 / c.cost; if (r <= 0) { o = c; break; } }
+    list.push(o.kind); spent += o.cost;
   }
   // never leave an unspendable remainder: a lone point always buys a Restless
   if (!list.length) { list.push('restless'); spent = Math.min(left, CONFIG.COST_RESTLESS); }
@@ -1635,6 +1663,12 @@ function planBurst(n, left) {
 }
 // gates: amber telegraph for 0.5 s, then the dirt bursts and they come through
 function telegraph(gate, list, delay) { G.telegraphs.push({ gate, list, t: delay === undefined ? CONFIG.TELEGRAPH_T : delay }); }
+// a pack is 8 skulls the first time you meet one and grows to the full 12 by the later waves,
+// so the wave the swarm is introduced is not the wave that ends the run
+function packSize(n) {
+  const lo = clamp(CONFIG.PACK_MIN + CONFIG.PACK_GROW * (n - CONFIG.WAVE_YORICK), CONFIG.PACK_MIN, CONFIG.PACK_MAX);
+  return Math.round(rand(lo, Math.min(lo + CONFIG.PACK_SPAN, CONFIG.PACK_MAX)));
+}
 function packAt(type, gx, gy, n, spread) {
   for (let i = 0; i < n; i++) { const a = rand(TAU), d = Math.sqrt(rand(1)) * spread; spawnEnemy(type, gx + Math.cos(a) * d, gy + Math.sin(a) * d); }
 }
@@ -1644,7 +1678,7 @@ function emerge(tg) {
   FX.burst(gx, gy, 12, { minSpeed: 60, maxSpeed: 220, minLife: 0.25, maxLife: 0.6, color: [PAL.stone, PAL.border, PAL.amber], minSize: 2, maxSize: 5, grav: 220, drag: 0.9 });
   for (const kind of tg.list) {
     if (kind === 'ghost') spawnGhost();   // not through this gate: behind the player's aim
-    else if (kind === 'yorickPack') packAt('yorick', gx, gy, randi(CONFIG.PACK_MAX - CONFIG.PACK_MIN + 1) + CONFIG.PACK_MIN, CONFIG.PACK_SPREAD);
+    else if (kind === 'yorickPack') packAt('yorick', gx, gy, packSize(G.wave), CONFIG.PACK_SPREAD);
     else if (kind === 'bossYoricks') packAt('yorick', gx, gy, ENEMY_DEFS.claudius.spawnYoricks.n, CONFIG.PACK_SPREAD);
     else if (kind === 'claudius') {
       const [bx, by] = gateInside(g, CONFIG.BOSS_GATE_IN);
@@ -1656,7 +1690,7 @@ function startWave(n) {
   G.wave = Math.max(1, n | 0);
   G.bossWave = G.wave === CONFIG.BOSS_WAVE;
   G.budget = G.bossWave ? 0 : waveBudget(G.wave);
-  G.spent = 0; G.burstT = CONFIG.BURST_FIRST; G.telegraphs.length = 0;
+  G.spent = 0; G.burstT = burstFirst(G.wave); G.telegraphs.length = 0;
   G.bossSpawned = false; G.bossDead = false; G.waveEndT = 0; G.winT = 0;
   G.waveCardT = CONFIG.WAVE_CARD_T;
   // the card slams in with it (juice §13.13): a low toll and a small thump through the stones
@@ -2054,6 +2088,7 @@ STATES.PLAYING = {
     updatePlayer(dt);
     updatePellets(dt);
     updateEnemies(dt);
+    if (G.state !== 'PLAYING') return;   // contact damage killed her: the rest of the tick is not ours
     updateCasings(dt);
     updatePickups(dt);
     FX.update(dt);
@@ -2180,6 +2215,7 @@ STATES.GAMEOVER = {
     Input.endTick();
     bankRun(false);
     G.quote = pick(QUOTES); G.overT = 0;
+    Audio.gameover();
   },
   update(dt) {
     G.overT += dt;
@@ -2288,6 +2324,7 @@ const GAME = {
   get version() { return VERSION; },
   get music() { return { mode: Music.mode, live: Music.live, audio: Audio.running, muted: Audio.muted }; },
   get heldKeys() { return Array.from(Input.keys); },   // focus-loss check: this must be empty after a blur
+  get mouse() { return { x: Input.mouse.x, y: Input.mouse.y, down: Input.mouse.down }; },   // resize check: logical mouse
   get player() { const p = G.player; return { x: p.x, y: p.y, aim: p.aim, kvx: p.kvx, kvy: p.kvy, gun: p.gun.state, shells: p.gun.shells, hp: p.hp, god: p.god }; },
   get enemyList() { return G.enemies.filter((e) => !e.dead).map((e) => ({ id: e.id, type: e.type, x: Math.round(e.x), y: Math.round(e.y), hp: e.hp, kv: Math.round(Math.hypot(e.kvx, e.kvy)) })); },
   get pelletList() { return G.pellets.map((b) => ({ x: Math.round(b.x), y: Math.round(b.y), age: b.age })); },
