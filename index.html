@@ -65,6 +65,17 @@ const CONFIG = {
   // unlocks and HARD HABIT (spec §8)
   UNLOCK_WAVE: 5, UNLOCK_KILLS: 500, UNLOCK_RUNS: 3, UNLOCK_WINS: 1,
   HARD_WAVE: 4, HARD_HEARTS: 2, HARD_MULT: 1.5, HARD_PILL_W: 214, HARD_PILL_H: 34, HARD_PILL_X: 66, HARD_PILL_Y: 388,
+  // the Ghost (spec §5): enters on the border point behind the player's aim, wave 6+, dissolves upward
+  GHOST_WAVER_AMP: 0.32, GHOST_WAVER_FREQ: 2.4, GHOST_WISPS: 14, GHOST_RISE: -260, GHOST_FADE_T: 1.0,
+  // music (spec §12 last row): own gain ~12 dB under the sfx bus, ducked on every shot
+  MUSIC_GAIN: 0.18, MUSIC_DUCK: 0.5, MUSIC_DUCK_T: 0.15, MUSIC_DUCK_CHOIR: 0.35, MUSIC_DUCK_CHOIR_T: 0.9,
+  MUSIC_ROOT: 55, MUSIC_DRONE_MUL: 2, MUSIC_DRONE_GAIN: 0.55, MUSIC_DRONE_CUT: 240, MUSIC_DETUNE: 8,
+  MUSIC_BPM: 96, MUSIC_LOOKAHEAD: 0.1, MUSIC_STEPS: 16, MUSIC_ARP_OCT: 3, MUSIC_FADE: 0.5, MUSIC_IDLE: 3,
+  MUSIC_CUT_BASE: 700, MUSIC_CUT_PER: 150, MUSIC_CUT_MAX: 3400, MUSIC_CUT_Q: 5,
+  MUSIC_DENS_BASE: 0.35, MUSIC_DENS_PER: 0.06, MUSIC_DENS_MAX: 0.95,
+  MUSIC_NOTE_T: 0.17, MUSIC_NOTE_GAIN: 0.16,
+  // low-HP heartbeat (juice §13.15) and the wave-card slam
+  HEARTBEAT_HP: 1, HEARTBEAT_T: 1.05, LOWHP_VIG: 0.16, WAVE_SLAM_SHAKE: 4, WAVE_SLAM_BELL: 0.5,
   // pickups
   HEART_HEAL: 1, HEART_R: 10, HEART_LIFE: 14, HEART_BLINK: 3,
   // debug drip spawner (GAME.debugSpawn only; the wave system owns the real spawns)
@@ -92,7 +103,7 @@ const FAM_SANS = '-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Aria
 // CSS shorthand wants the weight BEFORE the size, or the whole declaration is dropped
 const FSERIF = (px, italic) => (italic ? 'italic ' : '') + 'bold ' + px + 'px ' + FAM_SERIF;
 const FSANS = (px, regular) => (regular ? '' : 'bold ') + px + 'px ' + FAM_SANS;
-const VERSION = '0.5.0-m5';
+const VERSION = '0.7.0-m7';
 
 // ===================================================================== UTIL
 const TAU = Math.PI * 2;
@@ -227,8 +238,10 @@ const Input = (() => {
   window.addEventListener('mouseup', (e) => { if (e.button === 0) mouse.down = false; });
   window.addEventListener('contextmenu', (e) => e.preventDefault());
   function clear() { keys.clear(); justPressed.clear(); mouse.down = false; mouse.justDown = false; }
+  // focus loss clears every held key (no stuck movement) and pauses; a hidden tab also stops the audio
+  // graph until the next input, which calls Audio.unlock() and resumes it.
   window.addEventListener('blur', () => { clear(); onFocusLost(); });
-  document.addEventListener('visibilitychange', () => { if (document.hidden) { clear(); onFocusLost(); } });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { clear(); onFocusLost(); Audio.suspend(); } });
   function endTick() { justPressed.clear(); mouse.justDown = false; }
   const pressed = (code) => justPressed.has(code);
   const held = (code) => keys.has(code);
@@ -260,7 +273,7 @@ const Audio = (() => {
     shaper = ac.createWaveShaper(); shaper.curve = tanhCurve(); shaper.oversample = 'none';
     sfx = ac.createGain(); sfx.gain.value = 0.7; // headroom: only stacked blasts drive the shaper into grit
     sfx.connect(shaper); shaper.connect(comp); comp.connect(master); master.connect(ac.destination);
-    musicGain = ac.createGain(); musicGain.gain.value = 0.25; musicGain.connect(comp);
+    musicGain = ac.createGain(); musicGain.gain.value = CONFIG.MUSIC_GAIN; musicGain.connect(comp);
     noise = ac.createBuffer(1, Math.floor(ac.sampleRate * 2), ac.sampleRate);
     const d = noise.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
   }
@@ -270,6 +283,8 @@ const Audio = (() => {
       if (ac.state === 'suspended') ac.resume();
     } catch (e) { /* audio is optional */ }
   }
+  // alt-tab: the whole graph stops until the next input, which calls unlock() and resumes it
+  function suspend() { try { if (ac && ac.state === 'running') ac.suspend(); } catch (e) { /* ignore */ } }
   function ready() { return !!ac && ac.state === 'running' && !muted; }
   // voice cap: at most 4 of a sound per 50 ms; stacked instances get a little louder instead
   function voice(name) {
@@ -304,10 +319,12 @@ const Audio = (() => {
     const g = ac.createGain(); env(g, t0, n.peak, n.dur);
     s.connect(f); f.connect(g); g.connect(n.dest || sfx); s.start(t0, s.loopStart); s.stop(t0 + n.dur + 0.03);
   }
-  function duck(to, back) {
+  // duck the music bus to `mult` of its resting level and bring it back over `back` seconds
+  function duck(mult, back) {
     if (!musicGain) return; const t = ac.currentTime;
     musicGain.gain.cancelScheduledValues(t); musicGain.gain.setValueAtTime(musicGain.gain.value, t);
-    musicGain.gain.linearRampToValueAtTime(to, t + 0.01); musicGain.gain.linearRampToValueAtTime(0.25, t + back);
+    musicGain.gain.linearRampToValueAtTime(CONFIG.MUSIC_GAIN * mult, t + 0.01);
+    musicGain.gain.linearRampToValueAtTime(CONFIG.MUSIC_GAIN, t + back);
   }
   // ---- sounds (filled in as the systems land)
   const S = {};
@@ -319,7 +336,7 @@ const Audio = (() => {
     noiseBurst({ t, dur: CONFIG.BLAST_NOISE_DUR, sweep: CONFIG.BLAST_NOISE_SWEEP, peak: 1.1 * v, type: 'bandpass', f0: 1800 * j, f1: 250 * j, q: 1.2 });
     osc({ type: 'sine', f0: 120 * j, f1: 38 * j, sweep: 0.09, dur: CONFIG.BLAST_SINE_DUR, peak: CONFIG.BLAST_SINE_PEAK * v, t });
     osc({ type: 'triangle', f0: 55 * j, f1: 45 * j, sweep: 0.1, dur: CONFIG.BLAST_TRI_DUR, peak: 0.5 * v, t });
-    duck(0.08, 0.35);
+    duck(CONFIG.MUSIC_DUCK, CONFIG.MUSIC_DUCK_T);
   };
   // chk-chk: two filtered clicks 90 ms apart, the second lower = "ready"
   S.pump = () => {
@@ -358,7 +375,21 @@ const Audio = (() => {
       osc({ type: 'sine', f0: f, dur: 1.2 - i * 0.1, peak: (0.26 - i * 0.04) * v, t: t0 });
       osc({ type: 'triangle', f0: f * 1.004, dur: 1.0 - i * 0.1, peak: (0.09 - i * 0.015) * v, t: t0 });
     }
-    duck(0.1, 0.9);
+    duck(CONFIG.MUSIC_DUCK_CHOIR, CONFIG.MUSIC_DUCK_CHOIR_T);
+  };
+  // the Ghost arrives behind you: an airy swell so the ambush is heard even when it is not seen
+  S.ghost = () => {
+    const v = voice('ghost'); if (!v) return; const t = ac.currentTime, j = jit();
+    noiseBurst({ t, dur: 0.5, sweep: 0.4, peak: 0.22 * v, type: 'bandpass', f0: 400 * j, f1: 2400 * j, q: 3 });
+    osc({ type: 'sine', f0: 330 * j, f1: 660 * j, sweep: 0.4, dur: 0.5, peak: 0.1 * v, t });
+    osc({ type: 'sine', f0: 331.5 * j, f1: 664 * j, sweep: 0.4, dur: 0.5, peak: 0.09 * v, t });
+  };
+  // last heart: a lub-dub under everything (juice §13.15)
+  S.heartbeat = () => {
+    const v = voice('heartbeat'); if (!v) return; const t = ac.currentTime;
+    noiseBurst({ t, dur: 0.14, peak: 0.18 * v, type: 'lowpass', f0: 160, f1: 60, q: 1 });
+    osc({ type: 'sine', f0: 78, f1: 42, sweep: 0.1, dur: 0.17, peak: 0.55 * v, t });
+    osc({ type: 'sine', f0: 70, f1: 38, sweep: 0.1, dur: 0.15, peak: 0.34 * v, t: t + 0.22 });
   };
   S.bell = (mult = 1) => {
     const v = voice('bell'); if (!v) return; const t = ac.currentTime, f = 660 * mult;
@@ -371,10 +402,98 @@ const Audio = (() => {
   }
   function setMuted(m) { muted = !!m; try { if (master) master.gain.value = muted ? 0 : MASTER; } catch (e) { /* ignore */ } }
   // public wrappers never throw
-  const api = { unlock, toggleMute, setMuted, get muted() { return muted; }, get running() { return ready(); } };
+  const api = { unlock, suspend, toggleMute, setMuted, get muted() { return muted; }, get running() { return ready(); } };
   for (const k in S) api[k] = (...a) => { try { S[k](...a); } catch (e) { /* audio must never break the game */ } };
   api._S = S; api._osc = osc; api._noise = noiseBurst; api._voice = voice; api._duck = duck; api._jit = jit; api._ctx = () => ac;
+  api._musicBus = () => musicGain;
   return api;
+})();
+
+// ---------------------------------------------------------------- MUSIC (spec §12, last row)
+// A minor-key organ pedal drone (two detuned saws -> lowpass) under TITLE and the card screen; a
+// scheduled 16th-note triangle arpeggio over i-VI-III-VII joins in PLAYING, its lowpass cutoff and
+// note density climbing with the wave. Own gain into the same compressor, ~12 dB under the sfx bus,
+// ducked on every shot. It schedules nothing while paused, muted, or with the context suspended,
+// and it owns exactly two long-lived oscillators, torn down after MUSIC_IDLE seconds of silence.
+const Music = (() => {
+  // i · VI · III · VII in A minor, voiced close together so the figure walks instead of leaping
+  const CHORDS = [[0, 3, 7, 12], [-4, 0, 3, 8], [3, 7, 10, 15], [-2, 2, 5, 10]];
+  const ARP = [0, 1, 2, 3, 2, 1, 2, 3];  // the figure walked inside each chord
+  let ac = null, bus = null, built = false, mode = 'off', offAt = 0, wave = 1;
+  let droneOscA = null, droneOscB = null, droneFilter = null, droneGain = null, arpFilter = null, arpGain = null;
+  let step = 0, bar = 0, nextT = 0;
+  const hz = (semi) => CONFIG.MUSIC_ROOT * Math.pow(2, semi / 12);
+  function build() {
+    ac = Audio._ctx(); bus = Audio._musicBus();
+    if (!ac || !bus) return false;
+    droneFilter = ac.createBiquadFilter(); droneFilter.type = 'lowpass'; droneFilter.frequency.value = CONFIG.MUSIC_DRONE_CUT; droneFilter.Q.value = 0.7;
+    droneGain = ac.createGain(); droneGain.gain.value = 0.0001;
+    droneFilter.connect(droneGain); droneGain.connect(bus);
+    const f = CONFIG.MUSIC_ROOT * CONFIG.MUSIC_DRONE_MUL;
+    droneOscA = ac.createOscillator(); droneOscA.type = 'sawtooth'; droneOscA.frequency.value = f; droneOscA.detune.value = -CONFIG.MUSIC_DETUNE;
+    droneOscB = ac.createOscillator(); droneOscB.type = 'sawtooth'; droneOscB.frequency.value = f; droneOscB.detune.value = CONFIG.MUSIC_DETUNE;
+    droneOscA.connect(droneFilter); droneOscB.connect(droneFilter);
+    droneOscA.start(); droneOscB.start();
+    arpFilter = ac.createBiquadFilter(); arpFilter.type = 'lowpass'; arpFilter.frequency.value = CONFIG.MUSIC_CUT_BASE; arpFilter.Q.value = CONFIG.MUSIC_CUT_Q;
+    arpGain = ac.createGain(); arpGain.gain.value = 0.0001;
+    arpFilter.connect(arpGain); arpGain.connect(bus);
+    built = true; step = 0; bar = 0; nextT = 0;
+    return true;
+  }
+  // kill every node this module owns: nothing survives a newGame() or a long silence
+  function teardown() {
+    for (const o of [droneOscA, droneOscB]) { if (!o) continue; try { o.stop(); } catch (e) { /* already stopped */ } try { o.disconnect(); } catch (e) { /* ignore */ } }
+    for (const n of [droneFilter, droneGain, arpFilter, arpGain]) { if (n) try { n.disconnect(); } catch (e) { /* ignore */ } }
+    droneOscA = droneOscB = droneFilter = droneGain = arpFilter = arpGain = null;
+    built = false; nextT = 0; step = 0; bar = 0;
+  }
+  const cutoff = () => Math.min(CONFIG.MUSIC_CUT_MAX, CONFIG.MUSIC_CUT_BASE + CONFIG.MUSIC_CUT_PER * Math.max(0, wave - 1));
+  const density = () => Math.min(CONFIG.MUSIC_DENS_MAX, CONFIG.MUSIC_DENS_BASE + CONFIG.MUSIC_DENS_PER * Math.max(0, wave - 1));
+  // one triangle note: its oscillator stops itself, so the graph never grows
+  function note(f, t) {
+    const o = ac.createOscillator(); o.type = 'triangle'; o.frequency.setValueAtTime(f, t);
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(CONFIG.MUSIC_NOTE_GAIN, t + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + CONFIG.MUSIC_NOTE_T);
+    o.connect(g); g.connect(arpFilter); o.start(t); o.stop(t + CONFIG.MUSIC_NOTE_T + 0.02);
+  }
+  function scheduleStep(t) {
+    const ch = CHORDS[bar % CHORDS.length];
+    const down = step % 4 === 0;
+    if (!down && Math.random() > density()) return;
+    const semi = ch[ARP[step % ARP.length] % ch.length] + CONFIG.MUSIC_ARP_OCT * 12;
+    note(hz(semi), t);
+    if (down && step === 0) note(hz(ch[0] + (CONFIG.MUSIC_ARP_OCT - 1) * 12), t);
+  }
+  function set(m, waveN) {
+    if (waveN) wave = waveN;
+    if (m === mode) return;
+    mode = m;
+    if (m === 'off' && ac) offAt = ac.currentTime;
+  }
+  function update() {
+    try {
+      if (mode !== 'off' && !built && !build()) return;
+      if (!built) return;
+      if (!Audio.running) { nextT = 0; return; }   // no context, suspended, muted or paused: schedule nothing
+      const t = ac.currentTime, tc = CONFIG.MUSIC_FADE / 3;
+      droneGain.gain.setTargetAtTime(mode === 'off' ? 0.0001 : CONFIG.MUSIC_DRONE_GAIN, t, tc);
+      arpGain.gain.setTargetAtTime(mode === 'play' ? 1 : 0.0001, t, tc);
+      arpFilter.frequency.setTargetAtTime(cutoff(), t, 0.3);
+      if (mode !== 'play') { nextT = 0; if (mode === 'off' && t - offAt > CONFIG.MUSIC_IDLE) teardown(); return; }
+      const sixteenth = 60 / CONFIG.MUSIC_BPM / 4;
+      if (nextT < t) { nextT = t + 0.05; step = 0; }   // first note, or back from a suspend: restart the bar
+      while (nextT < t + CONFIG.MUSIC_LOOKAHEAD) {
+        scheduleStep(nextT);
+        nextT += sixteenth;
+        step++;
+        if (step >= CONFIG.MUSIC_STEPS) { step = 0; bar++; }
+      }
+    } catch (e) { /* music is optional; never break the frame */ }
+  }
+  function stop() { try { set('off'); teardown(); } catch (e) { /* ignore */ } }
+  return { set, update, stop, get mode() { return mode; }, get live() { return built; } };
 })();
 
 // ===================================================================== SPRITES
@@ -901,7 +1020,7 @@ const FX = (() => {
   function shake(pxAmp, dur = CONFIG.SHAKE_FIRE_T) { cam.shakeAmp = Math.max(cam.shakeAmp * (cam.shakeT / cam.shakeDur), pxAmp); cam.shakeT = cam.shakeDur = dur; }
   function kick(dx, dy) { cam.kickX += dx; cam.kickY += dy; }
   const flashes = [], pops = [];
-  let hurtFlash = 0, whiteFlash = 0;
+  let hurtFlash = 0, whiteFlash = 0, beatFlash = 0;
   function flash(x, y, angle) { flashes.push({ x, y, angle, t: 0 }); }
   function pop(x, y, r) { pops.push({ x, y, r, t: 0 }); }
   // advances on render time so shake still moves during hitstop
@@ -916,6 +1035,7 @@ const FX = (() => {
     for (let i = pops.length - 1; i >= 0; i--) { pops[i].t += dt; if (pops[i].t > 0.08) pops.splice(i, 1); }
     hurtFlash = Math.max(0, hurtFlash - dt * 2.5);
     whiteFlash = Math.max(0, whiteFlash - dt * 6);
+    beatFlash = Math.max(0, beatFlash - dt * 3);
   }
   // pre-rendered radial blobs: built once at boot, blitted forever (no per-frame gradients anywhere)
   let glowBlob, gateGlow, vignetteCv, redVignette;
@@ -960,13 +1080,15 @@ const FX = (() => {
   }
   function drawOverlays(c) {
     vignette(c, 1);
-    if (hurtFlash > 0) { c.globalAlpha = Math.min(1, hurtFlash); c.drawImage(redVignette, 0, 0); c.globalAlpha = 1; }
+    // the hurt flash and the last-heart heartbeat share one pre-rendered red vignette
+    const red = Math.max(hurtFlash, beatFlash * CONFIG.LOWHP_VIG);
+    if (red > 0) { c.globalAlpha = Math.min(1, red); c.drawImage(redVignette, 0, 0); c.globalAlpha = 1; }
     if (whiteFlash > 0) { c.fillStyle = 'rgba(255,255,255,' + (whiteFlash * 0.5).toFixed(3) + ')'; c.fillRect(0, 0, CONFIG.W, CONFIG.H); }
   }
-  function reset() { clearAll(); flashes.length = 0; pops.length = 0; hurtFlash = 0; whiteFlash = 0; cam.shakeT = 0; cam.shakeAmp = 0; cam.kickX = cam.kickY = cam.x = cam.y = cam.rot = 0; }
+  function reset() { clearAll(); flashes.length = 0; pops.length = 0; hurtFlash = 0; whiteFlash = 0; beatFlash = 0; cam.shakeT = 0; cam.shakeAmp = 0; cam.kickX = cam.kickY = cam.x = cam.y = cam.rot = 0; }
   return {
     spawn, burst, update, draw, clearAll, reset, cam, shake, kick, flash, pop, tickRender, prerender, drawFlashes, drawOverlays, vignette, glow,
-    alive: () => aliveCount, hurt() { hurtFlash = 1; }, white(v = 1) { whiteFlash = Math.max(whiteFlash, v); },
+    alive: () => aliveCount, hurt() { hurtFlash = 1; }, white(v = 1) { whiteFlash = Math.max(whiteFlash, v); }, beat() { beatFlash = 1; },
   };
 })();
 
@@ -1181,8 +1303,9 @@ const ENEMY_DEFS = {
   yorick: { hp: 1, speed: 140, r: 7, mass: 0.5, knock: 1, wobble: true, score: 5, color: PAL.bone, shade: PAL.boneShade },
   gravedigger: { hp: 14, speed: 60, r: 24, mass: 4, knock: 0.3, heartDrop: 0.3, score: 50, color: PAL.greyGreen, shade: PAL.greyGreenShade },
   claudius: { hp: 80, speed: 45, r: 36, mass: 8, knock: 0.1, spawnYoricks: { every: 4, n: 6 }, score: 500, boss: true, color: PAL.purple, shade: PAL.purpleShade },
-  // the Ghost's art is done; its spawn rule and wave slot belong to the SHOULD list (M7)
-  ghost: { hp: 5, speed: 55, r: 12, mass: 1, knock: 0, alpha: 0.5, noSeparation: true, score: 30, color: PAL.ghost, shade: PAL.ghostShade },
+  // the Ghost walks in on the border point behind the player's aim, drifts through the crowd
+  // (no separation, no knockback) and dissolves upward instead of coming apart.
+  ghost: { hp: 5, speed: 55, r: 12, mass: 1, knock: 0, alpha: 0.5, noSeparation: true, waver: true, dissolve: true, score: 30, color: PAL.ghost, shade: PAL.ghostShade },
 };
 function spawnEnemy(type, x, y) {
   const def = ENEMY_DEFS[type] || ENEMY_DEFS.restless;
@@ -1199,6 +1322,7 @@ function spawnEnemy(type, x, y) {
 }
 function gateInside(g, d) { return g.side === 'top' ? [g.x, g.y + d] : g.side === 'bottom' ? [g.x, g.y - d] : g.side === 'left' ? [g.x + d, g.y] : [g.x - d, g.y]; }
 function spawnClump(type, n) {
+  if (type === 'ghost') { let k = 0; for (let i = 0; i < n; i++) if (spawnGhost()) k++; return k; }  // Ghosts obey their own spawn rule
   const [cx, cy] = gateInside(pick(Floor.gates()), 60);
   let made = 0;
   for (let i = 0; i < n; i++) { const a = rand(TAU), d = Math.sqrt(rand(1)) * (14 + n * 1.6); if (spawnEnemy(type, cx + Math.cos(a) * d, cy + Math.sin(a) * d)) made++; }
@@ -1226,6 +1350,8 @@ function updateEnemies(dt) {
       mvx = dx * sp; mvy = dy * sp;
       // Yoricks weave: a sine term perpendicular to the approach, so a pack arrives as a shoal
       if (e.def.wobble) { e.wobT += dt; const w = Math.sin(e.wobT * CONFIG.WOBBLE_FREQ) * CONFIG.WOBBLE_AMP; mvx -= dy * sp * w; mvy += dx * sp * w; }
+      // the Ghost wavers: a slower, wider version of the same perpendicular sine
+      else if (e.def.waver) { e.wobT += dt; const w = Math.sin(e.wobT * CONFIG.GHOST_WAVER_FREQ) * CONFIG.GHOST_WAVER_AMP; mvx -= dy * sp * w; mvy += dx * sp * w; }
       e.animT += (dt * sp) / 11; e.frame = Math.floor(e.animT) % 2;
       if (Math.abs(dx) > 0.15) e.face = dx < 0 ? -1 : 1;   // sprites face +x; flip toward the nun
     }
@@ -1308,11 +1434,16 @@ function killEnemy(e, shot) {
   // white pop, chunks along the knock, bone confetti, floor splat
   FX.pop(e.x, e.y, e.r);
   const ks = Math.hypot(e.kvx, e.kvy), dir = ks > 30 ? Math.atan2(e.kvy, e.kvx) : rand(TAU), arc = ks > 30 ? 1.6 : TAU;
-  // chunks are shade tones only: live-enemy green in the air reads as another enemy in a crowd
-  FX.burst(e.x, e.y, CONFIG.CHUNKS, { angle: dir, arc, minSpeed: 120 + ks * 0.2, maxSpeed: 300 + ks * 0.4, minLife: 0.35, maxLife: 0.7, color: def.shade, minSize: 4, maxSize: 7, drag: CONFIG.CHUNK_DRAG });
-  FX.burst(e.x, e.y, CONFIG.CONFETTI, { minSpeed: 60, maxSpeed: 240, minLife: 0.4, maxLife: 0.9, color: PAL.bone, minSize: 2, maxSize: 3.5, grav: 200, drag: CONFIG.CONFETTI_DRAG });
-  splatDecal(e.x, e.y, def.shade, e.r, dir, ks);
-  Audio.death(e.mass);
+  if (def.dissolve) {
+    // a Ghost has no body to come apart: it goes up and out, and leaves nothing on the stones
+    FX.burst(e.x, e.y - e.r * 0.5, CONFIG.GHOST_WISPS, { minSpeed: 10, maxSpeed: 70, minLife: 0.45, maxLife: CONFIG.GHOST_FADE_T, color: [PAL.cyan, PAL.ghostShade, PAL.bone], minSize: 2, maxSize: 4.5, grav: CONFIG.GHOST_RISE, drag: CONFIG.CONFETTI_DRAG });
+  } else {
+    // chunks are shade tones only: live-enemy green in the air reads as another enemy in a crowd
+    FX.burst(e.x, e.y, CONFIG.CHUNKS, { angle: dir, arc, minSpeed: 120 + ks * 0.2, maxSpeed: 300 + ks * 0.4, minLife: 0.35, maxLife: 0.7, color: def.shade, minSize: 4, maxSize: 7, drag: CONFIG.CHUNK_DRAG });
+    FX.burst(e.x, e.y, CONFIG.CONFETTI, { minSpeed: 60, maxSpeed: 240, minLife: 0.4, maxLife: 0.9, color: PAL.bone, minSize: 2, maxSize: 3.5, grav: 200, drag: CONFIG.CONFETTI_DRAG });
+    splatDecal(e.x, e.y, def.shade, e.r, dir, ks);
+  }
+  if (def.dissolve) Audio.ghost(); else Audio.death(e.mass);
   if (def.heartDrop && Math.random() < def.heartDrop) spawnPickup(e.x, e.y);
   if (def.boss) bossDown(e);
 }
@@ -1465,7 +1596,30 @@ function payloadOptions(n) {
   const o = [{ kind: 'restless', cost: CONFIG.COST_RESTLESS }];
   if (n >= CONFIG.WAVE_YORICK) o.push({ kind: 'yorickPack', cost: CONFIG.COST_YORICK_PACK });
   if (n >= CONFIG.WAVE_GRAVEDIGGER) o.push({ kind: 'gravedigger', cost: CONFIG.COST_GRAVEDIGGER });
+  if (n >= CONFIG.WAVE_GHOST) o.push({ kind: 'ghost', cost: CONFIG.COST_GHOST });
   return o;
+}
+// THE GHOST'S SPAWN RULE (spec §5): the border point on the ray OPPOSITE the player's aim, i.e.
+// directly behind where she is looking. It ignores the gate its burst was drawn from — the Ghost
+// walks through the wall, and where it comes from is the whole point of the enemy.
+function ghostSpawnPoint() {
+  const p = G.player, B = CONFIG.BORDER + ENEMY_DEFS.ghost.r;
+  const [dx, dy] = norm(-p.aimX, -p.aimY);
+  const x0 = clamp(p.x, B, CONFIG.W - B), y0 = clamp(p.y, B, CONFIG.H - B);
+  let t = Infinity;
+  if (dx > 1e-6) t = Math.min(t, (CONFIG.W - B - x0) / dx); else if (dx < -1e-6) t = Math.min(t, (B - x0) / dx);
+  if (dy > 1e-6) t = Math.min(t, (CONFIG.H - B - y0) / dy); else if (dy < -1e-6) t = Math.min(t, (B - y0) / dy);
+  if (!(t >= 0 && t < Infinity)) t = 0;
+  return [x0 + dx * t, y0 + dy * t];
+}
+function spawnGhost() {
+  const [x, y] = ghostSpawnPoint();
+  const e = spawnEnemy('ghost', x, y);
+  if (e) {
+    FX.burst(x, y, 10, { minSpeed: 20, maxSpeed: 90, minLife: 0.3, maxLife: 0.7, color: [PAL.cyan, PAL.ghostShade], minSize: 2, maxSize: 4, grav: CONFIG.GHOST_RISE * 0.4, drag: 0.94 });
+    Audio.ghost();
+  }
+  return e;
 }
 function planBurst(n, left) {
   const points = Math.max(2, Math.ceil(waveBudget(n) / CONFIG.BURSTS_PER_WAVE));
@@ -1489,7 +1643,8 @@ function emerge(tg) {
   const J = CONFIG.GATE_JITTER;
   FX.burst(gx, gy, 12, { minSpeed: 60, maxSpeed: 220, minLife: 0.25, maxLife: 0.6, color: [PAL.stone, PAL.border, PAL.amber], minSize: 2, maxSize: 5, grav: 220, drag: 0.9 });
   for (const kind of tg.list) {
-    if (kind === 'yorickPack') packAt('yorick', gx, gy, randi(CONFIG.PACK_MAX - CONFIG.PACK_MIN + 1) + CONFIG.PACK_MIN, CONFIG.PACK_SPREAD);
+    if (kind === 'ghost') spawnGhost();   // not through this gate: behind the player's aim
+    else if (kind === 'yorickPack') packAt('yorick', gx, gy, randi(CONFIG.PACK_MAX - CONFIG.PACK_MIN + 1) + CONFIG.PACK_MIN, CONFIG.PACK_SPREAD);
     else if (kind === 'bossYoricks') packAt('yorick', gx, gy, ENEMY_DEFS.claudius.spawnYoricks.n, CONFIG.PACK_SPREAD);
     else if (kind === 'claudius') {
       const [bx, by] = gateInside(g, CONFIG.BOSS_GATE_IN);
@@ -1504,6 +1659,9 @@ function startWave(n) {
   G.spent = 0; G.burstT = CONFIG.BURST_FIRST; G.telegraphs.length = 0;
   G.bossSpawned = false; G.bossDead = false; G.waveEndT = 0; G.winT = 0;
   G.waveCardT = CONFIG.WAVE_CARD_T;
+  // the card slams in with it (juice §13.13): a low toll and a small thump through the stones
+  FX.shake(CONFIG.WAVE_SLAM_SHAKE, CONFIG.SHAKE_FIRE_T);
+  Audio.bell(CONFIG.WAVE_SLAM_BELL);
 }
 // budget spent and the courtyard empty: slow-mo, bell, cards
 function endWave() {
@@ -1691,7 +1849,7 @@ function newGame() {
     pendingShots: [], multPopT: 9, lastMult: 1, newBest: false,
     budget: 0, spent: 0, burstT: 0, telegraphs: [], waveCardT: 0, waveEndT: 0, winT: 0,
     bossWave: false, bossSpawned: false, bossDead: false, encore: false,
-    debugSpawn: false, dummies: false, spawnT: 1.0, quote: '', overT: 0, nextId: 1,
+    debugSpawn: false, dummies: false, spawnT: 1.0, quote: '', overT: 0, nextId: 1, beatT: 0,
     bankedKills: 0, bankedRun: false,
     picks: {}, cards: [], cardHover: -1, cardT: 0, newUnlocks: [], hard: false,
   };
@@ -1905,6 +2063,12 @@ STATES.PLAYING = {
     resolveShots(dt);
     if (G.waveCardT > 0) G.waveCardT -= dt;
     if (G.comboT > 0) { G.comboT -= dt; if (G.comboT <= 0) G.chain = 0; }
+    // last heart: a lub-dub and a breath of red at the edges until she picks one up (juice §13.15)
+    const pl = G.player;
+    if (pl.hp > 0 && pl.hp <= CONFIG.HEARTBEAT_HP && !pl.god) {
+      G.beatT -= dt;
+      if (G.beatT <= 0) { G.beatT = CONFIG.HEARTBEAT_T; Audio.heartbeat(); FX.beat(); }
+    } else G.beatT = 0;
     // the multiplier pops whenever it changes
     const m = comboMult() * encoreMult() * hardMult();
     if (Math.abs(m - G.lastMult) > 1e-6) { G.lastMult = m; G.multPopT = 0; } else G.multPopT += dt;
@@ -2122,6 +2286,8 @@ const GAME = {
   get multiplier() { return comboMult() * encoreMult() * hardMult(); },
   get bossHp() { for (const e of G.enemies) if (e.def.boss && !e.dead) return e.hp; return 0; },
   get version() { return VERSION; },
+  get music() { return { mode: Music.mode, live: Music.live, audio: Audio.running, muted: Audio.muted }; },
+  get heldKeys() { return Array.from(Input.keys); },   // focus-loss check: this must be empty after a blur
   get player() { const p = G.player; return { x: p.x, y: p.y, aim: p.aim, kvx: p.kvx, kvy: p.kvy, gun: p.gun.state, shells: p.gun.shells, hp: p.hp, god: p.god }; },
   get enemyList() { return G.enemies.filter((e) => !e.dead).map((e) => ({ id: e.id, type: e.type, x: Math.round(e.x), y: Math.round(e.y), hp: e.hp, kv: Math.round(Math.hypot(e.kvx, e.kvy)) })); },
   get pelletList() { return G.pellets.map((b) => ({ x: Math.round(b.x), y: Math.round(b.y), age: b.age })); },
@@ -2197,8 +2363,10 @@ function frame(now) {
   // fps
   RT += dt;
   Perf._frames++; Perf._acc += dt; if (Perf._acc >= 0.5) { Perf.fps = Perf._frames / Perf._acc; Perf._frames = 0; Perf._acc = 0; }
-  // render-time systems: shake, kick, flashes, slow-mo timer
+  // render-time systems: shake, kick, flashes, slow-mo timer, the music scheduler
   FX.tickRender(dt);
+  Music.set(G.state === 'PLAYING' ? 'play' : G.state === 'TITLE' || G.state === 'UPGRADE' ? 'drone' : 'off', G.wave);
+  Music.update();
   if (G.slowmoT > 0) { G.slowmoT -= dt; if (G.slowmoT <= 0) G.timeScale = G.baseTimeScale; }
   // wave-end and boss-death slow-mo run on render time, so 0.4 s means 0.4 s no matter how slow the sim is
   if (G.state === 'PLAYING') {
