@@ -3,10 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Nunnery">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#1b1f3a">
+<link rel="manifest" href="data:application/manifest+json,%7B%22name%22%3A%22Get%20thee%20to%20a%20Nunnery%22%2C%22short_name%22%3A%22Nunnery%22%2C%22display%22%3A%22fullscreen%22%2C%22orientation%22%3A%22landscape%22%2C%22background_color%22%3A%22%23000000%22%2C%22theme_color%22%3A%22%231b1f3a%22%2C%22start_url%22%3A%22.%22%7D">
 <title>Get thee to a Nunnery</title>
 <style>
-html,body{margin:0;padding:0;background:#000;height:100%;overflow:hidden;-webkit-user-select:none;user-select:none;touch-action:none;overscroll-behavior:none}
+html,body{margin:0;padding:0;background:#000;height:100%;overflow:hidden;overscroll-behavior:none;-webkit-user-select:none;user-select:none;touch-action:none}
 canvas#c{position:absolute;left:0;top:0;display:block;cursor:none;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none}
+/* touch build: the canvas IS the viewport, and the 960x540 courtyard is letterboxed INSIDE it */
+canvas#c.full{position:fixed;left:0;top:0;right:0;bottom:0;width:100vw;height:100vh;height:100dvh}
 </style>
 </head>
 <body>
@@ -91,14 +99,23 @@ const CONFIG = {
   HEART_HEAL: 1, HEART_R: 10, HEART_LIFE: 14, HEART_BLINK: 3, HEART_DROP: 0.3,
   // debug drip spawner (GAME.debugSpawn only; the wave system owns the real spawns)
   SPAWN_EVERY: 2, SPAWN_N: 2,
-  // ---- MOBILE TOUCH: floating twin sticks, aim-to-fire, on-canvas buttons. All logical px.
-  // Left half of the canvas = move stick, right half = aim stick; the base lands under the finger.
-  STICK_R: 64, STICK_DEAD: 0.12, STICK_FULL: 0.85, STICK_FIRE: 0.35, STICK_KNOB_R: 22,
+  // ---- MOBILE TOUCH. The canvas fills the viewport and the courtyard is letterboxed inside it, so
+  // every touch number below is in CSS px of the SCREEN (sticks and buttons live over the bars too).
+  // Left half of the SCREEN = move stick, right half = aim stick; the base lands under the finger.
+  STICK_R_CSS: 60, STICK_KNOB_CSS: 24, STICK_DEAD: 0.12, STICK_FULL: 0.85, STICK_FIRE: 0.35,
   STICK_LW: 1.5, STICK_BASE_A: 0.35, STICK_KNOB_A: 0.6,
   TAP_MS: 180, TAP_PX: 12,          // a tap on the aim half: one shot down the current aim
   TOUCH_MOUSE_LOCK: 700,            // ignore the compatibility mouse events a tap emits behind it
-  TOUCH_BTN_R: 21, TOUCH_HIT: 64, TOUCH_BTN_X: 50, TOUCH_BTN_Y: 74, TOUCH_BTN_GAP: 68,
-  HAPTICS: true, HAPTIC_FIRE: 12, HAPTIC_HURT: 35,
+  // 'flick': drag to aim, RELEASE to fire one shell (pull back inside the dead zone to cancel).
+  // 'hold':  the old behaviour, deflection past STICK_FIRE holds the trigger down.
+  TOUCH_FIRE_MODE: 'flick',
+  TOUCH_AIM_ASSIST: true, TOUCH_AIM_ASSIST_DEG: 10, TOUCH_AIM_ASSIST_RANGE: 260,
+  TOUCH_BTN_R: 22, TOUCH_HIT: 48, TOUCH_BTN_PAD: 10, TOUCH_BTN_GAP: 54, TOUCH_BTN_GUARD: 70,
+  TOUCH_SAFE_MIN: 12,               // fallback inset when env(safe-area-inset-*) reads 0
+  TOUCH_AIM_LINE_A: 0.5,            // the thin line from the nun to the reticle while she is aimed
+  FIRE_PILL_W: 268, FIRE_PILL_H: 40, FIRE_PILL_Y: 344,   // the FIRE: FLICK / HOLD pill on the pause card
+  ROTATE_CARD_W: 430, ROTATE_CARD_H: 390,   // the ROTATE card's own box, fitted to the screen
+  HAPTICS: true, HAPTIC_FIRE: 12, HAPTIC_FLICK: 20, HAPTIC_HURT: 35,
 };
 
 const PAL = {
@@ -116,6 +133,8 @@ const PAL = {
   purpleShade: '#56297a', paleFace: '#d8c3e0', ghost: '#8fe3ff', ghostShade: '#5fb5d6',
   heart: '#e0475a', heartHi: '#ff8a96', brassDark: '#a87a2c', borderHi: '#7c8398', gateDark: '#0d0f1c',
   shadow: 'rgba(0,0,0,0.35)',
+  // the letterbox bars on a phone: the floor darkened ~35%, so the screen bleeds stone, not void
+  bar: '#121426',
 };
 const FAM_SERIF = 'Georgia, "Times New Roman", serif';
 const FAM_SANS = '-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif';
@@ -200,29 +219,73 @@ function keycap(c, x, y, ch, size) {
 function dim(c, a) { c.fillStyle = 'rgba(7,7,13,' + a + ')'; c.fillRect(0, 0, CONFIG.W, CONFIG.H); }
 function rule(c, x, y, w, color) { c.fillStyle = color || PAL.amber; c.fillRect(x, y, w, 2); }
 
-// canvas + letterbox viewport
+// canvas + letterbox viewport.
+// DESKTOP: the canvas element IS the arena, centred, with the page background showing through.
+// TOUCH:   the canvas element IS the viewport (position:fixed, inset 0) and the 960x540 arena is
+//          letterboxed inside it by one setTransform. Either way View.offsetX/Y + View.scale map
+//          logical -> CSS px of the VIEWPORT, so toScreen/toLogical (and the harness) never change.
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
-const View = { scale: 1, offsetX: 0, offsetY: 0, dpr: 1, portrait: false };
+const View = { scale: 1, offsetX: 0, offsetY: 0, dpr: 1, portrait: false, full: false, cssW: CONFIG.W, cssH: CONFIG.H };
+// safe-area insets, read once from a probe element's computed padding (notches, home indicator)
+const Safe = { top: CONFIG.TOUCH_SAFE_MIN, right: CONFIG.TOUCH_SAFE_MIN, bottom: CONFIG.TOUCH_SAFE_MIN, left: CONFIG.TOUCH_SAFE_MIN };
+let safeRead = false;
+function readSafeArea() {
+  if (safeRead) return;
+  safeRead = true;
+  try {
+    const d = document.createElement('div');
+    d.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;' +
+      'padding-top:env(safe-area-inset-top);padding-right:env(safe-area-inset-right);padding-bottom:env(safe-area-inset-bottom);padding-left:env(safe-area-inset-left)';
+    document.body.appendChild(d);
+    const cs = window.getComputedStyle(d);
+    const n = (v) => { const f = parseFloat(v); return isFinite(f) && f > 0 ? f : 0; };
+    Safe.top = Math.max(CONFIG.TOUCH_SAFE_MIN, n(cs.paddingTop));
+    Safe.right = Math.max(CONFIG.TOUCH_SAFE_MIN, n(cs.paddingRight));
+    Safe.bottom = Math.max(CONFIG.TOUCH_SAFE_MIN, n(cs.paddingBottom));
+    Safe.left = Math.max(CONFIG.TOUCH_SAFE_MIN, n(cs.paddingLeft));
+    d.parentNode.removeChild(d);
+  } catch (e) { /* insets are a nicety: the 12 px default stands */ }
+}
+// the full-viewport canvas is for fingers only: touch mode, or a coarse primary pointer before the
+// first touch. A real mouse move drops touch mode AND hands the desktop letterbox back.
+function fullCanvas() { return Touch.on || (!Touch.sawMouse && coarsePointer()); }
 function resize() {
-  const iw = window.innerWidth || CONFIG.W, ih = window.innerHeight || CONFIG.H;
-  const s = Math.min(iw / CONFIG.W, ih / CONFIG.H);
-  View.scale = s; View.dpr = Math.min(window.devicePixelRatio || 1, CONFIG.DPR_CAP);
+  const iw = Math.max(1, window.innerWidth || CONFIG.W), ih = Math.max(1, window.innerHeight || CONFIG.H);
+  View.dpr = Math.min(window.devicePixelRatio || 1, CONFIG.DPR_CAP);
   View.portrait = ih > iw;   // a phone held upright: the touch build asks for a turn
-  const cw = CONFIG.W * s, ch = CONFIG.H * s;
-  View.offsetX = Math.floor((iw - cw) / 2); View.offsetY = Math.floor((ih - ch) / 2);
-  canvas.style.width = cw + 'px'; canvas.style.height = ch + 'px';
-  canvas.style.left = View.offsetX + 'px'; canvas.style.top = View.offsetY + 'px';
+  const full = fullCanvas();
+  View.full = full;
+  canvas.classList.toggle('full', full);
+  let cw, ch;
+  if (full) {
+    readSafeArea();
+    // the stylesheet sizes it (100vw x 100dvh): measure what the browser actually gave us
+    const r = canvas.getBoundingClientRect();
+    cw = Math.max(1, Math.round(r.width) || iw); ch = Math.max(1, Math.round(r.height) || ih);
+    canvas.style.left = ''; canvas.style.top = ''; canvas.style.width = ''; canvas.style.height = '';
+    View.scale = Math.min(cw / CONFIG.W, ch / CONFIG.H);
+    View.offsetX = Math.floor((cw - CONFIG.W * View.scale) / 2);
+    View.offsetY = Math.floor((ch - CONFIG.H * View.scale) / 2);
+  } else {
+    View.scale = Math.min(iw / CONFIG.W, ih / CONFIG.H);
+    cw = CONFIG.W * View.scale; ch = CONFIG.H * View.scale;
+    View.offsetX = Math.floor((iw - cw) / 2); View.offsetY = Math.floor((ih - ch) / 2);
+    canvas.style.width = cw + 'px'; canvas.style.height = ch + 'px';
+    canvas.style.left = View.offsetX + 'px'; canvas.style.top = View.offsetY + 'px';
+  }
+  View.cssW = cw; View.cssH = ch;
   canvas.width = Math.max(1, Math.round(cw * View.dpr)); canvas.height = Math.max(1, Math.round(ch * View.dpr));
   Input.refreshMouse();
 }
 window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', () => setTimeout(resize, 50));
+document.addEventListener('fullscreenchange', () => setTimeout(resize, 50));
 
 // persistence: localStorage with an in-memory fallback, never throws
 const Save = (() => {
   const KEY = 'nunnery.v1';
-  const def = () => ({ hi: 0, bestWave: 0, kills: 0, runs: 0, wins: 0, unlocks: [], mute: false });
+  const def = () => ({ hi: 0, bestWave: 0, kills: 0, runs: 0, wins: 0, unlocks: [], mute: false, touchFire: CONFIG.TOUCH_FIRE_MODE, hints: {} });
   let data = def();
   function load() {
     try {
@@ -236,16 +299,23 @@ const Save = (() => {
 })();
 
 // ===================================================================== TOUCH
-// Mobile control layer. Two FLOATING sticks in logical canvas space: a touch that starts on the left
-// half is the move stick, one on the right half is the aim stick. Base under the finger, knob clamped
-// to STICK_R. Deflecting the aim stick past STICK_FIRE holds the trigger down the same path as LMB;
-// a tap on the right half fires one shell down the current aim. Desktop is untouched: nothing in here
-// runs until a real touch pointer arrives, and a mouse move afterwards hands control back.
+// Mobile control layer. The canvas fills the viewport, so everything in here works in CSS px of the
+// SCREEN: two FLOATING sticks (left half = move, right half = aim) that may sit over the letterbox
+// bars, and a row of buttons in the safe-area top-right corner.
+//
+// FIRE is a FLICK by default: drag the right thumb to turn her and see the shot line, LIFT to fire
+// one shell down that line; pull back inside the dead zone first and the shot is cancelled. A short
+// tap fires down the current aim. CONFIG.TOUCH_FIRE_MODE = 'hold' restores the old hold-to-fire.
+// Desktop is untouched: nothing here runs until a real touch pointer arrives, and a mouse move
+// hands control (and the centred letterbox canvas) straight back.
 const Touch = {
   on: false,            // touchMode: latched by the first touch pointerdown, dropped by a mouse move
   move: null, aim: null, // the two live sticks (null = that finger is up; floating sticks show nothing at rest)
   aimAng: 0,            // survives the finger lifting: she keeps looking where she was pointed
   fireHeld: false, fireOnce: false, lastT: -1e9,
+  sawMouse: false,      // a real mouse has moved: stop guessing "coarse pointer" at resize time
+  mode: CONFIG.TOUCH_FIRE_MODE,
+  fsTried: false,       // the fullscreen request is made once, on the gesture that starts a run
 };
 const nowMs = () => (window.performance && performance.now ? performance.now() : Date.now());
 // a phone should meet the touch title card, not a WASD hint it cannot use: guess at boot from the
@@ -254,19 +324,80 @@ function coarsePointer() {
   try { return (navigator.maxTouchPoints || 0) > 0 && !!window.matchMedia && window.matchMedia('(pointer: coarse)').matches; }
   catch (e) { return false; }
 }
+// ---- fire mode (persisted): 'flick' (drag, release to fire) or 'hold' (deflect and she keeps firing)
+function touchFireMode() { return Touch.mode === 'hold' ? 'hold' : 'flick'; }
+function setTouchFireMode(v) {
+  Touch.mode = v === 'hold' ? 'hold' : 'flick';
+  Touch.fireHeld = false;
+  try { Save.data.touchFire = Touch.mode; Save.save(); } catch (e) { /* save is best-effort */ }
+  return Touch.mode;
+}
+const flickMode = () => touchFireMode() === 'flick';
+// ---- one-off hints (the iOS add-to-home-screen line), remembered in the save
+function hintSeen(id) { const h = Save.data.hints; return !!(h && h[id]); }
+function hintDismiss(id) {
+  const s = Save.data;
+  if (!s.hints || typeof s.hints !== 'object') s.hints = {};
+  s.hints[id] = true; Save.save();
+}
+// iOS Safari outside standalone: with no Fullscreen API there, the only real fullscreen is Add to
+// Home Screen. The fullscreenEnabled test is what actually separates iOS Safari from everything else
+// (a desktop browser emulating a phone has the API, and gets the ⛶ button instead of this line).
+function iosBrowser() {
+  try {
+    const ua = navigator.userAgent || '';
+    const ios = /iPad|iPhone|iPod/.test(ua) || (/Mac/.test(ua) && (navigator.maxTouchPoints || 0) > 1);
+    if (!ios) return false;
+    if (navigator.standalone === true) return false;
+    if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return false;
+    return true;
+  } catch (e) { return false; }
+}
+function showA2HS() { return Touch.on && !hintSeen('a2hs') && !fullscreenAvailable() && iosBrowser(); }
+// ---- fullscreen. Requested on the user gesture that starts a run; iOS reports it unavailable.
+function fullscreenAvailable() { try { return !!document.fullscreenEnabled; } catch (e) { return false; } }
+function isFullscreen() { try { return !!document.fullscreenElement; } catch (e) { return false; } }
+function enterFullscreen() {
+  try {
+    const el = document.documentElement;
+    if (el && el.requestFullscreen && !document.fullscreenElement) {
+      const pr = el.requestFullscreen({ navigationUI: 'hide' });
+      if (pr && pr.catch) pr.catch(() => {});
+    }
+  } catch (e) { /* denied, unsupported, or not a user gesture */ }
+  try {
+    if (screen.orientation && screen.orientation.lock) {
+      const pr = screen.orientation.lock('landscape');
+      if (pr && pr.catch) pr.catch(() => {});
+    }
+  } catch (e) { /* orientation locking is a nicety */ }
+}
+function exitFullscreen() {
+  try { if (document.exitFullscreen && document.fullscreenElement) { const pr = document.exitFullscreen(); if (pr && pr.catch) pr.catch(() => {}); } }
+  catch (e) { /* nothing to do */ }
+}
+function toggleFullscreen() { if (isFullscreen()) exitFullscreen(); else enterFullscreen(); }
+// the gesture that starts a run is the one chance to go fullscreen and lock landscape
+function fullscreenOnStart() {
+  if (!Touch.on || Touch.fsTried) return;
+  Touch.fsTried = true;
+  enterFullscreen();
+}
+
+// ---- floating sticks. bx/by/kx/ky are CSS px of the SCREEN.
 function newStick(id, x, y) {
-  const m = CONFIG.STICK_R * 0.5;   // keep the base on screen even if the thumb lands on a letterbox bar
-  const bx = clamp(x, m, CONFIG.W - m), by = clamp(y, m, CONFIG.H - m);
+  const m = CONFIG.STICK_R_CSS * 0.5;   // keep the base on screen even if the thumb lands at the very edge
+  const bx = clamp(x, m, Math.max(m, View.cssW - m)), by = clamp(y, m, Math.max(m, View.cssH - m));
   const s = { id, bx, by, kx: bx, ky: by, mag: 0, ang: 0, travel: 0, t0: nowMs() };
   stickMove(s, x, y);
   return s;
 }
-// knob follows the finger, clamped to STICK_R; a zero-length deflection keeps the last angle (never NaN)
+// knob follows the finger, clamped to STICK_R_CSS; a zero-length deflection keeps the last angle (never NaN)
 function stickMove(s, x, y) {
   const dx = x - s.bx, dy = y - s.by, d = Math.hypot(dx, dy);
   if (d > s.travel) s.travel = d;
-  s.mag = Math.min(1, d / CONFIG.STICK_R);
-  if (d > 1e-4) { s.ang = Math.atan2(dy, dx); s.kx = s.bx + (dx / d) * s.mag * CONFIG.STICK_R; s.ky = s.by + (dy / d) * s.mag * CONFIG.STICK_R; }
+  s.mag = Math.min(1, d / CONFIG.STICK_R_CSS);
+  if (d > 1e-4) { s.ang = Math.atan2(dy, dx); s.kx = s.bx + (dx / d) * s.mag * CONFIG.STICK_R_CSS; s.ky = s.by + (dy / d) * s.mag * CONFIG.STICK_R_CSS; }
   else { s.kx = s.bx; s.ky = s.by; }
 }
 // dead zone to 1.0 at STICK_FULL of the radius, smoothed: a thumb that barely leans does not sprint
@@ -284,34 +415,77 @@ function setTouchMode(v) {
   Touch.on = v;
   if (v && G && G.player) Touch.aimAng = G.player.aim;   // start pointed where she is already looking
   if (!v) clearTouch();
+  resize();   // the canvas layout is different on the two paths
   return v;
 }
-// aim angle tracks the knob past the dead zone; past STICK_FIRE the trigger is held
+// she is aimed (past the dead zone): the knob goes amber and the shot line shows where the shell goes
+function aimLive() { return !!(Touch.on && Touch.aim && Touch.aim.mag > CONFIG.STICK_DEAD); }
+// aim angle tracks the knob past the dead zone; in HOLD mode, past STICK_FIRE the trigger is held
 function aimStickChanged() {
   const s = Touch.aim; if (!s) return;
   if (s.mag > CONFIG.STICK_DEAD) Touch.aimAng = s.ang;
+  if (flickMode()) { Touch.fireHeld = false; return; }
   const f = s.mag >= CONFIG.STICK_FIRE;
   if (f && !Touch.fireHeld) Touch.fireOnce = true;   // the rising edge also feeds the fire buffer
   Touch.fireHeld = f;
 }
-// on-canvas buttons, inside the arena's top-right corner: clear of the hearts, the thumbs and the notch.
-// PAUSE only exists in play; MUTE replaces the M keycap on the title card.
+// ---- aim assist (touch only): a shot released within TOUCH_AIM_ASSIST_DEG of a body inside pellet
+// reach snaps onto it. Nearest BY ANGLE wins, ties broken by distance. Full snap: a thumb is blunt.
+function angDelta(a, b) { let d = (a - b) % TAU; if (d > Math.PI) d -= TAU; else if (d < -Math.PI) d += TAU; return d; }
+function assistAim(ang) {
+  if (!CONFIG.TOUCH_AIM_ASSIST || !Touch.on || !G || !G.player || G.state !== 'PLAYING') return ang;
+  const p = G.player, lim = (CONFIG.TOUCH_AIM_ASSIST_DEG * Math.PI) / 180;
+  let best = ang, bestA = lim, bestD = Infinity;
+  for (const e of G.enemies) {
+    if (e.dead) continue;
+    const dx = e.x - p.x, dy = e.y - p.y, dist = Math.hypot(dx, dy);
+    if (dist < 1e-3 || dist > CONFIG.TOUCH_AIM_ASSIST_RANGE + (e.r || 0)) continue;
+    const ea = Math.atan2(dy, dx), da = Math.abs(angDelta(ea, ang));
+    if (da > lim) continue;
+    if (da < bestA - 1e-6 || (da <= bestA + 1e-6 && dist < bestD)) { best = ea; bestA = da; bestD = dist; }
+  }
+  return best;
+}
+// one shell, down the aim she can see, with the assist applied at the moment of release
+function touchFire(ang) {
+  if (ang != null) Touch.aimAng = ang;
+  Touch.aimAng = assistAim(Touch.aimAng);
+  Touch.fireOnce = true;
+}
+
+// on-screen buttons, top-right of the SCREEN inside the safe area: clear of the hearts and both
+// thumbs. PAUSE only exists in play; MUTE replaces the M keycap; FULLSCREEN hides where iOS forbids it.
 const NO_BUTTONS = [];
 function touchButtons() {
   if (!Touch.on || !G) return NO_BUTTONS;
-  const y = CONFIG.TOUCH_BTN_Y, x = CONFIG.W - CONFIG.TOUCH_BTN_X;
-  if (G.state === 'PLAYING') return [{ id: 'pause', x, y }, { id: 'mute', x: x - CONFIG.TOUCH_BTN_GAP, y }];
-  if (G.state === 'TITLE') return [{ id: 'mute', x, y }];
-  return NO_BUTTONS;
+  const R = CONFIG.TOUCH_BTN_R, pad = CONFIG.TOUCH_BTN_PAD;
+  const y = Safe.top + pad + R;
+  let x = View.cssW - Safe.right - pad - R;
+  const out = [];
+  const add = (id) => { out.push({ id, x, y }); x -= CONFIG.TOUCH_BTN_GAP; };
+  const play = G.state === 'PLAYING';
+  if (play) add('pause');
+  if (play || G.state === 'TITLE') add('mute');
+  if ((play || G.state === 'TITLE') && fullscreenAvailable()) add('fullscreen');
+  return out;
 }
-function touchButtonAt(lx, ly) {
+// screen-space hit test, 48 CSS px boxes
+function touchButtonAt(cx, cy) {
   if (!Touch.on) return null;
   const h = CONFIG.TOUCH_HIT / 2;
-  for (const b of touchButtons()) if (lx >= b.x - h && lx <= b.x + h && ly >= b.y - h && ly <= b.y + h) return b.id;
+  for (const b of touchButtons()) if (cx >= b.x - h && cx <= b.x + h && cy >= b.y - h && cy <= b.y + h) return b.id;
   return null;
+}
+// a thumb that lands this close to a button is reaching for the button, not planting a stick
+function nearTouchButton(cx, cy) {
+  if (!Touch.on) return false;
+  const g = CONFIG.TOUCH_BTN_GUARD;
+  for (const b of touchButtons()) if (Math.hypot(cx - b.x, cy - b.y) <= g) return true;
+  return false;
 }
 function pressTouchButton(id) {
   if (id === 'mute') { Audio.toggleMute(); Audio.click(); return; }
+  if (id === 'fullscreen') { Audio.click(); toggleFullscreen(); return; }
   if (id === 'pause') { clearTouch(); Audio.click(); if (G && G.state === 'PLAYING') setState('PAUSED'); }
 }
 // portrait on a touch device: the sim is frozen behind a ROTATE YOUR PHONE overlay
@@ -322,9 +496,11 @@ function haptic(ms) {
 }
 const stickSnap = (s) => (s ? { bx: s.bx, by: s.by, kx: s.kx, ky: s.ky, mag: s.mag, ang: s.ang } : null);
 function touchSnapshot() {
-  return { move: stickSnap(Touch.move), aim: stickSnap(Touch.aim), aimAngle: Touch.aimAng, fire: Touch.fireHeld, portrait: !!View.portrait };
+  return {
+    move: stickSnap(Touch.move), aim: stickSnap(Touch.aim), aimAngle: Touch.aimAng,
+    fire: Touch.fireHeld, aimed: aimLive(), mode: touchFireMode(), portrait: !!View.portrait,
+  };
 }
-
 // ===================================================================== INPUT
 // Listeners on window so aim works over the letterbox bars and CDP-dispatched events land without focus.
 const Input = (() => {
@@ -345,7 +521,7 @@ const Input = (() => {
   const mouseLocked = () => Touch.on && nowMs() - Touch.lastT < CONFIG.TOUCH_MOUSE_LOCK;
   window.addEventListener('mousemove', (e) => {
     if (mouseLocked()) return;
-    if (Touch.on) { if (e.clientX === mouse.cx && e.clientY === mouse.cy) return; setTouchMode(false); }
+    if (Touch.on) { if (e.clientX === mouse.cx && e.clientY === mouse.cy) return; Touch.sawMouse = true; setTouchMode(false); }
     mouse.cx = e.clientX; mouse.cy = e.clientY; refreshMouse();
   });
   window.addEventListener('mousedown', (e) => {
@@ -357,7 +533,8 @@ const Input = (() => {
   window.addEventListener('mouseup', (e) => { if (mouseLocked()) return; if (e.button === 0) mouse.down = false; });
   window.addEventListener('contextmenu', (e) => e.preventDefault());
 
-  // ---- pointer events (touch only): the twin sticks, the canvas buttons, and taps as clicks
+  // ---- pointer events (touch only): the twin sticks, the screen buttons, and taps as clicks.
+  // In touch mode the canvas IS the viewport, so clientX/clientY already ARE screen CSS px.
   function onDown(e) {
     if (e.pointerType !== 'touch') return;
     Touch.lastT = nowMs();
@@ -365,19 +542,21 @@ const Input = (() => {
     setTouchMode(true);
     Audio.unlock();
     if (rotateBlocked()) return;                 // the rotate overlay eats every touch
-    const [lx, ly] = toLogical(e.clientX, e.clientY);
-    const btn = touchButtonAt(lx, ly);           // a button eats its own tap, in every state it is drawn
+    const cx = e.clientX, cy = e.clientY;
+    const btn = touchButtonAt(cx, cy);           // a button eats its own tap, in every state it is drawn
     if (btn) { pressTouchButton(btn); return; }
     if (G && G.state === 'PLAYING') {
-      let half = lx < CONFIG.W / 2 ? 'move' : 'aim';
+      if (nearTouchButton(cx, cy)) return;       // reaching for a button: no stick under the fingertip
+      let half = cx < View.cssW / 2 ? 'move' : 'aim';
       if (Touch[half]) half = half === 'move' ? 'aim' : 'move';   // that half is busy: take the free one
       if (Touch[half]) return;                                    // both busy: a third finger does nothing
-      Touch[half] = newStick(e.pointerId, lx, ly);
+      Touch[half] = newStick(e.pointerId, cx, cy);
       if (half === 'aim') aimStickChanged();
       return;
     }
     // every other state (title, cards, pause, retry, encore): a tap IS a click
-    mouse.cx = e.clientX; mouse.cy = e.clientY; refreshMouse();
+    if (G && (G.state === 'TITLE' || G.state === 'GAMEOVER' || G.state === 'WIN')) fullscreenOnStart();
+    mouse.cx = cx; mouse.cy = cy; refreshMouse();
     mouse.down = true; mouse.justDown = true;
   }
   function onMove(e) {
@@ -385,7 +564,7 @@ const Input = (() => {
     Touch.lastT = nowMs();
     if (e.cancelable) e.preventDefault();
     const s = stickFor(e.pointerId);
-    if (s) { const [lx, ly] = toLogical(e.clientX, e.clientY); stickMove(s, lx, ly); if (s === Touch.aim) aimStickChanged(); return; }
+    if (s) { stickMove(s, e.clientX, e.clientY); if (s === Touch.aim) aimStickChanged(); return; }
     if (!G || G.state !== 'PLAYING') { mouse.cx = e.clientX; mouse.cy = e.clientY; refreshMouse(); }
   }
   function onUp(e, cancelled) {
@@ -396,8 +575,11 @@ const Input = (() => {
     const s = stickFor(e.pointerId);
     if (!s) return;
     if (s === Touch.aim) {
-      // a tap (short, barely moved) is one shell down the current aim
-      if (!cancelled && nowMs() - s.t0 <= CONFIG.TAP_MS && s.travel < CONFIG.TAP_PX) Touch.fireOnce = true;
+      const tap = nowMs() - s.t0 <= CONFIG.TAP_MS && s.travel < CONFIG.TAP_PX;
+      if (cancelled) { /* the OS took the finger: never a shot */ }
+      else if (flickMode() && s.mag > CONFIG.STICK_DEAD) { touchFire(s.ang); haptic(CONFIG.HAPTIC_FLICK); }  // FLICK: released while aimed
+      else if (tap) touchFire(null);                                                                          // TAP: one shell down the current aim
+      // else: dragged out and pulled back inside the dead zone -> cancelled, no shot
       Touch.aim = null; Touch.fireHeld = false;
     } else Touch.move = null;
   }
@@ -2193,25 +2375,38 @@ function drawPlayerReticle(c) {
     if (ex * p.aimX + ey * p.aimY > cosLimit) { hot = true; break; }
   }
   // touch has no cursor: the reticle rides the aim ray at kill range, so the hot/cold cue still reads
-  if (Touch.on) drawReticle(c, p.x + p.aimX * killRange, p.y + p.aimY * killRange, p.aimDist, hot, p.stats.spread / 2);
-  else drawReticle(c, m.x, m.y, p.aimDist, hot, p.stats.spread / 2);
+  if (Touch.on) {
+    const rx = p.x + p.aimX * killRange, ry = p.y + p.aimY * killRange;
+    // while the thumb is past the dead zone, the shot she is about to release is drawn as a thin line
+    if (aimLive()) {
+      const x0 = p.x + p.aimX * 18, y0 = p.y - 1 + p.aimY * 18;
+      c.save(); c.lineCap = 'round';
+      c.strokeStyle = 'rgba(7,7,13,0.5)'; c.lineWidth = 3;
+      c.beginPath(); c.moveTo(x0, y0); c.lineTo(rx, ry); c.stroke();
+      c.globalAlpha = CONFIG.TOUCH_AIM_LINE_A; c.strokeStyle = PAL.amber; c.lineWidth = 1.2;
+      c.beginPath(); c.moveTo(x0, y0); c.lineTo(rx, ry); c.stroke();
+      c.restore();
+    }
+    drawReticle(c, rx, ry, p.aimDist, hot, p.stats.spread / 2);
+  } else drawReticle(c, m.x, m.y, p.aimDist, hot, p.stats.spread / 2);
 }
 
-// ---------------------------------------------------------------- touch overlay (sticks, buttons, rotate)
-function drawStick(c, s, col, fireRing) {
+// ------------------------------------------------- touch overlay (SCREEN space, CSS px: over the bars)
+function drawStick(c, s, col, knobCol, fireRing) {
   if (!s) return;
+  const R = CONFIG.STICK_R_CSS, K = CONFIG.STICK_KNOB_CSS;
   c.save();
   c.lineWidth = CONFIG.STICK_LW; c.strokeStyle = col;
   c.globalAlpha = CONFIG.STICK_BASE_A;
-  c.beginPath(); c.arc(s.bx, s.by, CONFIG.STICK_R, 0, TAU); c.stroke();
-  if (fireRing) {   // the faint inner ring is the trigger: past it, she is firing
+  c.beginPath(); c.arc(s.bx, s.by, R, 0, TAU); c.stroke();
+  if (fireRing) {   // HOLD mode only: the faint inner ring is the trigger. Past it, she is firing.
     c.globalAlpha = CONFIG.STICK_BASE_A * 0.55;
-    c.beginPath(); c.arc(s.bx, s.by, CONFIG.STICK_R * CONFIG.STICK_FIRE, 0, TAU); c.stroke();
+    c.beginPath(); c.arc(s.bx, s.by, R * CONFIG.STICK_FIRE, 0, TAU); c.stroke();
   }
-  c.globalAlpha = CONFIG.STICK_KNOB_A; c.fillStyle = col;
-  c.beginPath(); c.arc(s.kx, s.ky, CONFIG.STICK_KNOB_R, 0, TAU); c.fill();
+  c.globalAlpha = CONFIG.STICK_KNOB_A; c.fillStyle = knobCol || col;
+  c.beginPath(); c.arc(s.kx, s.ky, K, 0, TAU); c.fill();
   c.globalAlpha = 1; c.strokeStyle = PAL.ink; c.lineWidth = 1.5;
-  c.beginPath(); c.arc(s.kx, s.ky, CONFIG.STICK_KNOB_R, 0, TAU); c.stroke();
+  c.beginPath(); c.arc(s.kx, s.ky, K, 0, TAU); c.stroke();
   c.restore();
 }
 function drawTouchButton(c, b) {
@@ -2220,7 +2415,18 @@ function drawTouchButton(c, b) {
   ell(c, b.x, b.y, R, R, 'rgba(7,7,13,0.55)', rgba(PAL.cream, 0.5), 1.5);
   const col = rgba(PAL.cream, 0.9);
   if (b.id === 'pause') { c.fillStyle = col; c.fillRect(b.x - 6.5, b.y - 8, 4.5, 16); c.fillRect(b.x + 2, b.y - 8, 4.5, 16); }
-  else {
+  else if (b.id === 'fullscreen') {
+    // four corner brackets, opening out of fullscreen when we are already in it
+    const g = 8, len = 5, out = isFullscreen();
+    c.strokeStyle = out ? rgba(PAL.amber, 0.9) : col; c.lineWidth = 2; c.lineCap = 'round'; c.lineJoin = 'round';
+    c.beginPath();
+    for (let i = 0; i < 4; i++) {
+      const sx = i & 1 ? 1 : -1, sy = i & 2 ? 1 : -1;
+      const cx = b.x + sx * g, cy = b.y + sy * g;
+      c.moveTo(cx - sx * len, cy); c.lineTo(cx, cy); c.lineTo(cx, cy - sy * len);
+    }
+    c.stroke();
+  } else {
     c.fillStyle = Audio.muted ? rgba(PAL.amber, 0.9) : col;
     c.fillRect(b.x - 9, b.y - 3.5, 5, 7);
     c.beginPath(); c.moveTo(b.x - 4, b.y - 3.5); c.lineTo(b.x + 2, b.y - 9); c.lineTo(b.x + 2, b.y + 9); c.lineTo(b.x - 4, b.y + 3.5); c.closePath(); c.fill();
@@ -2231,16 +2437,49 @@ function drawTouchButton(c, b) {
     c.stroke();
   }
 }
+// drawn ONCE per frame from draw(), in screen space, after the arena and the bars
 function drawTouchUI(c) {
   if (!Touch.on) return;
   for (const b of touchButtons()) drawTouchButton(c, b);
-  drawStick(c, Touch.move, PAL.cream, false);
-  drawStick(c, Touch.aim, PAL.amber, true);
+  drawStick(c, Touch.move, PAL.cream, PAL.cream, false);
+  // flick mode: the knob goes amber the moment she is aimed, which is the moment a release would fire
+  const hold = !flickMode();
+  drawStick(c, Touch.aim, PAL.amber, aimLive() ? PAL.amber : PAL.cream, hold);
+}
+// the letterbox bars: stone bleed rather than void, and they crop whatever the camera shake threw wide
+function drawBars(c) {
+  if (!View.full) return;
+  const w = View.cssW, h = View.cssH, ox = View.offsetX, oy = View.offsetY;
+  if (ox <= 0 && oy <= 0) return;
+  c.save();
+  // punch the courtyard out of a full-screen rect: everything below paints the BARS only
+  c.beginPath(); c.rect(0, 0, w, h); c.rect(ox, oy, w - ox * 2, h - oy * 2);
+  c.fillStyle = PAL.bar; c.fill('evenodd');
+  c.clip('evenodd');
+  const dark = (g) => { g.addColorStop(0, 'rgba(0,0,0,0.8)'); g.addColorStop(1, 'rgba(0,0,0,0)'); c.fillStyle = g; };
+  if (ox > 0) {   // the vignette, carried on out to the edges of the glass
+    dark(c.createLinearGradient(0, 0, ox, 0)); c.fillRect(0, 0, ox, h);
+    dark(c.createLinearGradient(w, 0, w - ox, 0)); c.fillRect(w - ox, 0, ox, h);
+  }
+  if (oy > 0) {
+    dark(c.createLinearGradient(0, 0, 0, oy)); c.fillRect(0, 0, w, oy);
+    dark(c.createLinearGradient(0, h, 0, h - oy)); c.fillRect(0, h - oy, w, oy);
+  }
+  c.restore();
+}
+// portrait phone: the ROTATE card takes the whole screen, sized to the glass rather than to the arena
+function drawRotateScreen(c) {
+  const w = View.cssW, h = View.cssH;
+  c.save();
+  c.fillStyle = 'rgba(7,7,13,0.94)'; c.fillRect(0, 0, w, h);
+  const k = Math.max(0.35, Math.min((w - 48) / CONFIG.ROTATE_CARD_W, (h - 48) / CONFIG.ROTATE_CARD_H));
+  c.translate(w / 2, h / 2); c.scale(k, k); c.translate(-CONFIG.W / 2, -CONFIG.H / 2);
+  drawRotate(c);
+  c.restore();
 }
 // portrait phone: hold everything and ask for a turn (the sim is frozen while this is up)
 function drawRotate(c) {
   const W = CONFIG.W, H = CONFIG.H;
-  c.fillStyle = 'rgba(7,7,13,0.92)'; c.fillRect(0, 0, W, H);
   const k = 0.5 - 0.5 * Math.cos(clamp01((RT % 2.4) / 1.2) * Math.PI);   // roll upright -> sideways and back
   c.save();
   c.translate(W / 2, H / 2 - 36); c.rotate(-k * Math.PI / 2);
@@ -2321,6 +2560,10 @@ STATES.TITLE = {
       const onPill = m.x >= r.x && m.x <= r.x + r.w && m.y >= r.y && m.y <= r.y + r.h;
       if (Input.pressed('KeyH') || (m.justDown && onPill)) { Opt.hard = !Opt.hard; Audio.click(); return; }
     }
+    if (showA2HS() && Input.mouse.justDown) {   // the small x on the add-to-home-screen line
+      const r = a2hsCloseRect(), m = Input.mouse;
+      if (m.x >= r.x && m.x <= r.x + r.w && m.y >= r.y && m.y <= r.y + r.h) { hintDismiss('a2hs'); Audio.click(); return; }
+    }
     if (Input.anyStart()) { startRun(); return; }
   },
   // the poster (ui-scratch.html): torchlit courtyard, the dead at the gates, the hero at 4.6x
@@ -2345,7 +2588,7 @@ STATES.TITLE = {
     uiText(c, 'A NUNNERY', 68, 244, FSERIF(98), PAL.cream, 'left', { shadow: 4 });
     rule(c, 72, 262, 380);
     uiText(c, 'She took the advice.', 74, 302, FSERIF(28, true), PAL.amber, 'left', { shadow: 2 });
-    const hint = Touch.on ? 'LEFT THUMB MOVE   ·   RIGHT THUMB AIM & FIRE   ·   TAP TO BEGIN' : 'WASD MOVE   ·   MOUSE AIM   ·   CLICK TO BEGIN';
+    const hint = Touch.on ? 'LEFT THUMB MOVE   ·   RIGHT THUMB DRAG TO AIM, RELEASE TO FIRE   ·   TAP TO BEGIN' : 'WASD MOVE   ·   MOUSE AIM   ·   CLICK TO BEGIN';
     uiText(c, hint, 74, 350, FSANS(13), rgba(PAL.cream, pulse(t, 0.7, 0.5, 1)), 'left', { spacing: 2, shadow: 1 });
     if (hardUnlocked()) {
       const r = hardPillRect(), on = Opt.hard;
@@ -2363,7 +2606,7 @@ STATES.TITLE = {
       keycap(c, W - 72 - mw - 30, 486, 'M', 20);
       uiText(c, mlab, W - 72, 502, FSANS(12), Audio.muted ? PAL.amber : rgba(PAL.cream, 0.7), 'right', { spacing: 2 });
     }
-    drawTouchUI(c);
+    if (showA2HS()) drawA2HS(c);
   },
 };
 
@@ -2401,7 +2644,6 @@ STATES.PLAYING = {
     drawHUD(c, hudData());
     if (G.waveCardT > 0) drawWaveCard(c, CONFIG.WAVE_CARD_T - G.waveCardT, waveName(G.wave), waveSub(G.wave));
     drawPlayerReticle(c);
-    drawTouchUI(c);   // sticks and buttons sit above the HUD
   },
 };
 
@@ -2489,12 +2731,39 @@ function drawWin(c, t, d) {
   if (d.best != null) uiText(c, 'BEST ' + fmt(d.best), W / 2, 400, FSANS(14), rgba(PAL.cream, 0.7), 'center', { spacing: 3 });
   if (d.newUnlock) drawNewUnlocks(c, 440);
 }
+// iOS Safari has no Fullscreen API: the honest fix is Add to Home Screen. One small line, dismissible.
+function a2hsRect() { return { x: CONFIG.W - 24 - 382, y: 474, w: 382, h: 32 }; }
+function a2hsCloseRect() { const r = a2hsRect(); return { x: r.x + r.w - 34, y: r.y - 1, w: 34, h: r.h + 2 }; }
+function drawA2HS(c) {
+  const r = a2hsRect(), x = a2hsCloseRect();
+  pill(c, r.x, r.y, r.w, r.h, 0.5);
+  uiText(c, 'FULL SCREEN: SHARE → ADD TO HOME SCREEN', r.x + 14, r.y + 21, FSANS(12), rgba(PAL.cream, 0.72), 'left', { spacing: 1.2 });
+  c.save();
+  c.strokeStyle = rgba(PAL.cream, 0.6); c.lineWidth = 1.6; c.lineCap = 'round';
+  const cx = x.x + x.w / 2, cy = r.y + r.h / 2, k = 5;
+  c.beginPath(); c.moveTo(cx - k, cy - k); c.lineTo(cx + k, cy + k); c.moveTo(cx + k, cy - k); c.lineTo(cx - k, cy + k); c.stroke();
+  c.restore();
+}
+// the fire-mode pill on the pause card (touch only): FLICK (drag, release) or HOLD (the old trigger)
+function firePillRect() { return { x: (CONFIG.W - CONFIG.FIRE_PILL_W) / 2, y: CONFIG.FIRE_PILL_Y, w: CONFIG.FIRE_PILL_W, h: CONFIG.FIRE_PILL_H }; }
+function drawFirePill(c) {
+  const r = firePillRect(), flick = flickMode();
+  pill(c, r.x, r.y, r.w, r.h, 0.62);
+  rrect(c, r.x, r.y, r.w, r.h, Math.min(r.h / 2, 10), null, rgba(PAL.cream, 0.3), 1.5);
+  const y = r.y + r.h / 2 + 5;
+  let x = r.x + 16;
+  x += uiText(c, 'FIRE', x, y, FSANS(13), rgba(PAL.cream, 0.6), 'left', { spacing: 2 }) + 14;
+  x += uiText(c, 'FLICK', x, y, FSANS(14), flick ? PAL.amber : rgba(PAL.cream, 0.35), 'left', { spacing: 2 }) + 12;
+  x += uiText(c, '⇄', x, y, FSANS(14), rgba(PAL.cream, 0.55), 'left') + 12;
+  uiText(c, 'HOLD', x, y, FSANS(14), flick ? rgba(PAL.cream, 0.35) : PAL.amber, 'left', { spacing: 2 });
+}
 function drawPause(c) {
   const W = CONFIG.W, H = CONFIG.H;
   dim(c, 0.6); FX.vignette(c, 0.5);
   uiText(c, 'PAUSED', W / 2, H / 2 - 4, FSANS(40), PAL.cream, 'center', { spacing: 12, shadow: 3 });
   rule(c, W / 2 - 44, H / 2 + 14, 88);
   uiText(c, Touch.on ? 'TAP TO RESUME' : 'ESC OR P TO RESUME', W / 2, H / 2 + 48, FSANS(13), rgba(PAL.cream, 0.75), 'center', { spacing: 4 });
+  if (Touch.on) { drawFirePill(c); uiText(c, 'TAP THE PILL TO SWITCH', W / 2, CONFIG.FIRE_PILL_Y + CONFIG.FIRE_PILL_H + 22, FSANS(11), rgba(PAL.cream, 0.45), 'center', { spacing: 2 }); }
 }
 
 const QUOTES = ['Goodnight, sweet nun.', 'Alas, poor Ophelia.', 'Get thee BACK to a nunnery.', 'Frailty, thy name is three hearts.', 'Something is rotten in Denmark. Mostly you.', 'The rest is silence. Until you click.'];
@@ -2538,7 +2807,14 @@ STATES.WIN = {
 STATES.PAUSED = {
   enter() { Input.endTick(); },
   update() {
-    if (Input.pressed('Escape') || Input.pressed('KeyP') || Input.anyStart()) { setState('PLAYING'); }
+    if (Input.pressed('Escape') || Input.pressed('KeyP')) { setState('PLAYING'); return; }
+    if (Touch.on && Input.mouse.justDown) {
+      const r = firePillRect(), m = Input.mouse;
+      if (m.x >= r.x && m.x <= r.x + r.w && m.y >= r.y && m.y <= r.y + r.h) {
+        setTouchFireMode(flickMode() ? 'hold' : 'flick'); Audio.click(); return;
+      }
+    }
+    if (Input.anyStart()) { setState('PLAYING'); }
   },
   draw(c) {
     drawWorld(c);
@@ -2617,8 +2893,13 @@ const GAME = {
   get player() { const p = G.player; return { x: p.x, y: p.y, aim: p.aim, kvx: p.kvx, kvy: p.kvy, gun: p.gun.state, shells: p.gun.shells, hp: p.hp, god: p.god }; },
   get enemyList() { return G.enemies.filter((e) => !e.dead).map((e) => ({ id: e.id, type: e.type, x: Math.round(e.x), y: Math.round(e.y), hp: e.hp, kv: Math.round(Math.hypot(e.kvx, e.kvy)) })); },
   get pelletList() { return G.pellets.map((b) => ({ x: Math.round(b.x), y: Math.round(b.y), age: b.age })); },
-  get viewport() { return { scale: View.scale, offsetX: View.offsetX, offsetY: View.offsetY, dpr: View.dpr, portrait: !!View.portrait }; },
+  get viewport() { return { scale: View.scale, offsetX: View.offsetX, offsetY: View.offsetY, dpr: View.dpr, portrait: !!View.portrait, full: !!View.full, cssW: View.cssW, cssH: View.cssH }; },
   get touchMode() { return Touch.on; }, set touchMode(v) { setTouchMode(v); },
+  get touchFireMode() { return touchFireMode(); }, set touchFireMode(v) { setTouchFireMode(v); },
+  get fullscreen() { return isFullscreen(); },
+  get fullscreenAvailable() { return fullscreenAvailable(); },
+  get touchButtons() { return touchButtons().map((b) => ({ id: b.id, x: b.x, y: b.y })); },   // screen CSS px
+  get firePill() { return Touch.on ? firePillRect() : null; },                                    // arena px
   get sticks() { return touchSnapshot(); },
   get rotatePrompt() { return rotateBlocked(); },
   get debugSpawn() { return G.debugSpawn; }, set debugSpawn(v) { G.debugSpawn = !!v; },
@@ -2678,16 +2959,28 @@ function safeUpdate(dt) {
 }
 let drawFails = 0;
 function draw() {
-  const s = View.scale * View.dpr;
-  ctx.setTransform(s, 0, 0, s, 0, 0);
+  const d = View.dpr;
+  // 1. the whole canvas. On touch that is the whole screen, and the bars start as darkened stone.
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+  ctx.fillStyle = View.full ? PAL.bar : PAL.floor;
+  ctx.fillRect(0, 0, View.cssW, View.cssH);
+  // 2. the 960x540 courtyard, letterboxed inside the canvas by one transform. Everything the game
+  //    draws (HUD included) is in these logical px and never needs to know where the glass ends.
+  const s = View.scale * d;
+  ctx.setTransform(s, 0, 0, s, View.offsetX * d, View.offsetY * d);
   ctx.fillStyle = PAL.floor; ctx.fillRect(0, 0, CONFIG.W, CONFIG.H);
-  try { STATES[G.state].draw(ctx); if (rotateBlocked()) drawRotate(ctx); drawFails = 0; }
+  try { STATES[G.state].draw(ctx); drawFails = 0; }
   catch (err) {
     if (drawFails++ === 0) console.error('draw failed', err);   // log the streak once, not every frame
     try { ctx.restore(); } catch (e2) { /* the throw may have left a save() open */ }
     try { if (G.state !== 'GAMEOVER') setState('GAMEOVER'); } catch (e2) { /* nothing left to do */ }
   }
   drawDebug(ctx);
+  // 3. screen space: the bars (which also crop the camera shake), the rotate card, and the thumbs
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+  drawBars(ctx);
+  if (rotateBlocked()) drawRotateScreen(ctx);   // the overlay eats every touch: no live buttons under it
+  else drawTouchUI(ctx);
 }
 let last = 0, acc = 0;
 function frame(now) {
@@ -2724,6 +3017,7 @@ function frame(now) {
 }
 function boot() {
   Save.load(); Audio.setMuted(Save.data.mute);
+  Touch.mode = Save.data.touchFire === 'hold' ? 'hold' : 'flick';   // the fire mode outlives the run
   G = newGame();
   FX.prerender(); buildSprites(); Floor.build(); resize();
   if (coarsePointer()) setTouchMode(true);

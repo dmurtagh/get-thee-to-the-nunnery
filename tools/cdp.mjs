@@ -115,6 +115,18 @@ export async function launch({ width = 1280, height = 720, port = 9400 + Math.fl
       await send('Input.dispatchTouchEvent', { type, touchPoints: list });
     },
     async tap(x, y, ms = 60, id = 1) { await api.touch([{ x, y, id }], 'touchStart'); await sleep(ms); await api.touch([], 'touchEnd'); },
+    // one finger from `from` to `to` in `steps` touchMoves. `release:false` leaves it on the glass
+    // (drive the rest yourself with touch()/drag() and lift with touch([], 'touchEnd')).
+    async drag(from, to, { steps = 6, ms = 120, id = 1, release = true, hold = 0 } = {}) {
+      await api.touch([{ x: from.x, y: from.y, id }], 'touchStart');
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        await api.touch([{ x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t, id }], 'touchMove');
+        await sleep(ms / steps);
+      }
+      if (hold) await sleep(hold);
+      if (release) await api.touch([], 'touchEnd');
+    },
     async setViewport({ width: w, height: h, deviceScaleFactor: dsf = 1, mobile: mob = false }) {
       await send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: dsf, mobile: mob });
     },
