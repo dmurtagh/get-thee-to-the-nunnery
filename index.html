@@ -484,7 +484,8 @@ function nearTouchButton(cx, cy) {
   return false;
 }
 function pressTouchButton(id) {
-  if (id === 'mute') { Audio.toggleMute(); Audio.click(); return; }
+  // no audio session yet (iOS home screen, or an interruption): the first tap buys sound back
+  if (id === 'mute') { if (Audio.needsUnlock) { Audio.unlock(); return; } Audio.toggleMute(); Audio.click(); return; }
   if (id === 'fullscreen') { Audio.click(); toggleFullscreen(); return; }
   if (id === 'pause') { clearTouch(); Audio.click(); if (G && G.state === 'PLAYING') setState('PAUSED'); }
 }
@@ -628,29 +629,128 @@ const Input = (() => {
 const Audio = (() => {
   let ac = null, sfx, shaper, comp, master, musicGain, noise;
   let muted = false;
+  // iOS home-screen web app: the context alone is not enough, so we also hold a playback audio
+  // session open with a silent media element and re-check the context on every gesture.
+  let keep, checkT = 0, fails = 0, needsUnlock = true, gestured = false;
   const recent = {};
   const MASTER = 0.8;
   function tanhCurve() { const n = 1024, c = new Float32Array(n); for (let i = 0; i < n; i++) { const x = (i / (n - 1)) * 2 - 1; c[i] = Math.tanh(x * 1.6) / Math.tanh(1.6); } return c; }
-  function build() {
-    master = ac.createGain(); master.gain.value = muted ? 0 : MASTER;
-    comp = ac.createDynamicsCompressor();
+  // the whole master chain in one function, because an iOS interruption can kill the context
+  // outright: buildGraph() is called again on the replacement and every node here is remade.
+  function buildGraph(c) {
+    master = c.createGain(); master.gain.value = muted ? 0 : MASTER;
+    comp = c.createDynamicsCompressor();
     comp.threshold.value = CONFIG.COMP_THRESH; comp.ratio.value = CONFIG.COMP_RATIO; comp.attack.value = CONFIG.COMP_ATTACK; comp.release.value = CONFIG.COMP_RELEASE; comp.knee.value = CONFIG.COMP_KNEE;
-    shaper = ac.createWaveShaper(); shaper.curve = tanhCurve(); shaper.oversample = 'none';
-    sfx = ac.createGain(); sfx.gain.value = 0.7; // headroom: only stacked blasts drive the shaper into grit
-    sfx.connect(shaper); shaper.connect(comp); comp.connect(master); master.connect(ac.destination);
-    musicGain = ac.createGain(); musicGain.gain.value = CONFIG.MUSIC_GAIN; musicGain.connect(comp);
-    noise = ac.createBuffer(1, Math.floor(ac.sampleRate * 2), ac.sampleRate);
+    shaper = c.createWaveShaper(); shaper.curve = tanhCurve(); shaper.oversample = 'none';
+    sfx = c.createGain(); sfx.gain.value = 0.7; // headroom: only stacked blasts drive the shaper into grit
+    sfx.connect(shaper); shaper.connect(comp); comp.connect(master); master.connect(c.destination);
+    musicGain = c.createGain(); musicGain.gain.value = CONFIG.MUSIC_GAIN; musicGain.connect(comp);
+    noise = c.createBuffer(1, Math.floor(c.sampleRate * 2), c.sampleRate);
     const d = noise.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  // ---- iOS: a home-screen web app starts in a session that the ringer switch can silence, and
+  // Web Audio alone will not move it. Safari 17+ lets us say so outright.
+  function session() { try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { /* older WebKit */ } }
+  // ~1 s of 8 kHz mono 16-bit PCM silence, written by hand into a Blob: no external asset, no data: URL
+  function silenceUrl() {
+    const rate = 8000, bytes = rate * 2, buf = new ArrayBuffer(44 + bytes), v = new DataView(buf);
+    const tag = (off, str) => { for (let i = 0; i < str.length; i++) v.setUint8(off + i, str.charCodeAt(i)); };
+    tag(0, 'RIFF'); v.setUint32(4, 36 + bytes, true); tag(8, 'WAVE');
+    tag(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    tag(36, 'data'); v.setUint32(40, bytes, true);   // the samples themselves are already zero
+    return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+  }
+  // ONE looping <audio> of that silence, made once and held forever (a collected element would drop
+  // the session). It must NOT be muted: a muted element does not switch the iOS session over.
+  function keepEl() {
+    if (keep !== undefined) return keep;
+    keep = null;
+    try {
+      if (typeof Blob === 'undefined' || !window.URL || !URL.createObjectURL || !document.createElement) return keep;
+      const el = document.createElement('audio');
+      el.loop = true; el.playsInline = true; el.setAttribute('playsinline', ''); el.setAttribute('webkit-playsinline', '');
+      el.preload = 'auto'; el.setAttribute('aria-hidden', 'true');
+      el.src = silenceUrl();
+      try { document.body.appendChild(el); } catch (e) { /* detached plays too */ }
+      keep = el;
+    } catch (e) { keep = null; }
+    return keep;
+  }
+  function keepPlay() {
+    try {
+      if (muted) return;                       // a muted game has no business holding the audio session
+      const el = keepEl();
+      if (!el || (!el.paused && live())) return;
+      const p = el.play();
+      if (p && p.catch) p.catch(() => { /* no gesture yet, or the OS said no */ });
+    } catch (e) { /* the keep-alive is a nicety */ }
+  }
+  function keepStop() { try { if (keep && !keep.paused) keep.pause(); } catch (e) { /* ignore */ } }
+  // iOS also reports a non-standard 'interrupted': anything that is not 'running' wants a resume
+  function live() { return !!ac && ac.state === 'running'; }
+  // Chrome rejects the promise on a closed context, some WebKit builds throw outright: swallow both,
+  // so the caller always reaches armCheck() and a dead context still gets replaced.
+  function tryResume() { try { const p = ac.resume(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* closed or interrupted */ } }
+  function watch(c) {
+    try {
+      c.onstatechange = () => {
+        try { if (c !== ac) return; if (c.state === 'running') { needsUnlock = false; fails = 0; } else needsUnlock = true; }
+        catch (e) { /* ignore */ }
+      };
+    } catch (e) { /* ignore */ }
+  }
+  // two gestures running that cannot get it back = the context is dead: build a whole new one
+  function armCheck() {
+    try {
+      if (checkT) return;
+      checkT = setTimeout(() => {
+        checkT = 0;
+        try {
+          if (!ac) return;
+          if (live()) { needsUnlock = false; fails = 0; return; }
+          needsUnlock = true;
+          if (++fails >= 2) { fails = 0; rebuild(); }
+        } catch (e) { /* ignore */ }
+      }, 300);
+    } catch (e) { /* ignore */ }
+  }
+  function rebuild() {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      const old = ac;
+      ac = null;
+      try { if (old) { old.onstatechange = null; const c = old.close(); if (c && c.catch) c.catch(() => {}); } } catch (e) { /* already gone */ }
+      for (const k in recent) delete recent[k];
+      ac = new AC(); buildGraph(ac); watch(ac); session();
+      tryResume();
+      keepPlay();
+      musicRebuild();   // the drone's two long-lived oscillators died with the old context
+    } catch (e) { /* audio is optional */ }
   }
   function unlock() {
     try {
-      if (!ac) { const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return; ac = new AC(); build(); }
-      if (ac.state === 'suspended') ac.resume();
+      gestured = true;
+      if (!ac) { const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return; ac = new AC(); buildGraph(ac); watch(ac); }
+      session();
+      if (!live()) { tryResume(); armCheck(); }
+      else { needsUnlock = false; fails = 0; }
+      keepPlay();
     } catch (e) { /* audio is optional */ }
+  }
+  // back from a hidden tab, a pause, or an iOS interruption. Never creates a context: that needs a gesture.
+  function resume() {
+    try {
+      if (!ac) return;
+      session();
+      if (!live()) { tryResume(); armCheck(); }
+      keepPlay();
+    } catch (e) { /* ignore */ }
   }
   // alt-tab: the whole graph stops until the next input, which calls unlock() and resumes it
   function suspend() { try { if (ac && ac.state === 'running') ac.suspend(); } catch (e) { /* ignore */ } }
-  function ready() { return !!ac && ac.state === 'running' && !muted; }
+  function ready() { return live() && !muted; }
   // voice cap: at most 4 of a sound per 50 ms; stacked instances get a little louder instead
   function voice(name) {
     if (!ready()) return 0;
@@ -773,11 +873,31 @@ const Audio = (() => {
   function toggleMute() {
     muted = !muted; Save.data.mute = muted; Save.save();
     try { if (master) master.gain.setTargetAtTime(muted ? 0 : MASTER, ac.currentTime, 0.02); } catch (e) { /* ignore */ }
+    if (muted) keepStop(); else keepPlay();   // silence should not go on holding the iOS audio session
     return muted;
   }
-  function setMuted(m) { muted = !!m; try { if (master) master.gain.value = muted ? 0 : MASTER; } catch (e) { /* ignore */ } }
+  function setMuted(m) { muted = !!m; try { if (master) master.gain.value = muted ? 0 : MASTER; } catch (e) { /* ignore */ } if (muted) keepStop(); }
+  // Every gesture type is a chance to start the audio: iOS hands out the session on any of them,
+  // and a home-screen web app often never sees the mousedown the desktop build relies on. All
+  // passive, so nothing here can swallow a tap or preventDefault a gesture the game wants.
+  try {
+    const gesture = () => unlock();
+    for (const ev of ['pointerdown', 'pointerup', 'touchend', 'click', 'keydown']) {
+      try { window.addEventListener(ev, gesture, { passive: true }); } catch (e) { window.addEventListener(ev, gesture); }
+    }
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) resume(); });
+    window.addEventListener('pageshow', () => resume());
+    window.addEventListener('focus', () => resume());
+  } catch (e) { /* audio is optional */ }
   // public wrappers never throw
-  const api = { unlock, suspend, toggleMute, setMuted, get muted() { return muted; }, get running() { return ready(); } };
+  const api = {
+    unlock, resume, suspend, toggleMute, setMuted,
+    get muted() { return muted; }, get running() { return ready(); },
+    get live() { return live(); },                                  // the context itself, mute aside
+    get state() { return ac ? ac.state : 'none'; },
+    get needsUnlock() { return needsUnlock || !live(); },           // draw the amber "tap me" dot
+    get gestured() { return gestured; },
+  };
   for (const k in S) api[k] = (...a) => { try { S[k](...a); } catch (e) { /* audio must never break the game */ } };
   api._S = S; api._osc = osc; api._noise = noiseBurst; api._voice = voice; api._duck = duck; api._jit = jit; api._ctx = () => ac;
   api._musicBus = () => musicGain;
@@ -868,8 +988,21 @@ const Music = (() => {
     } catch (e) { /* music is optional; never break the frame */ }
   }
   function stop() { try { set('off'); teardown(); } catch (e) { /* ignore */ } }
-  return { set, update, stop, get mode() { return mode; }, get live() { return built; } };
+  // the AudioContext was replaced under us (iOS interruption): our nodes belong to the dead one,
+  // so drop them and start the drone again on the new context if music was playing.
+  function rebuild() {
+    try {
+      const was = mode;
+      teardown();
+      ac = null; bus = null;
+      if (was !== 'off') build();
+    } catch (e) { /* music is optional */ }
+  }
+  return { set, update, stop, rebuild, get mode() { return mode; }, get live() { return built; } };
 })();
+// AUDIO calls this after it rebuilds the context. A hoisted declaration, so the module above -
+// which is defined first - can reach it at run time.
+function musicRebuild() { try { Music.rebuild(); } catch (e) { /* music is optional */ } }
 
 // ===================================================================== SPRITES
 // The Designer's procedural recipes (docs/jam/art/sprites-scratch.html), lifted.
@@ -2435,6 +2568,8 @@ function drawTouchButton(c, b) {
     if (Audio.muted) { c.moveTo(b.x + 5, b.y - 5); c.lineTo(b.x + 11, b.y + 5); c.moveTo(b.x + 11, b.y - 5); c.lineTo(b.x + 5, b.y + 5); }
     else { c.arc(b.x + 3, b.y, 7, -0.9, 0.9); }
     c.stroke();
+    // the context is not running: an amber pip says this button is the way to wake the sound up
+    if (Audio.needsUnlock) ell(c, b.x + 11, b.y - 12, 3, 3, PAL.amber, PAL.ink, 1);
   }
 }
 // drawn ONCE per frame from draw(), in screen space, after the arena and the bars
@@ -2590,6 +2725,8 @@ STATES.TITLE = {
     uiText(c, 'She took the advice.', 74, 302, FSERIF(28, true), PAL.amber, 'left', { shadow: 2 });
     const hint = Touch.on ? 'LEFT THUMB MOVE   ·   RIGHT THUMB DRAG TO AIM, RELEASE TO FIRE   ·   TAP TO BEGIN' : 'WASD MOVE   ·   MOUSE AIM   ·   CLICK TO BEGIN';
     uiText(c, hint, 74, 350, FSANS(13), rgba(PAL.cream, pulse(t, 0.7, 0.5, 1)), 'left', { spacing: 2, shadow: 1 });
+    // a home-screen web app opens with no audio session at all: one tap is all it takes
+    if (Touch.on && Audio.needsUnlock) uiText(c, 'TAP FOR SOUND', 74, 370, FSANS(11), rgba(PAL.amber, pulse(t, 0.7, 0.45, 0.95)), 'left', { spacing: 2, shadow: 1 });
     if (hardUnlocked()) {
       const r = hardPillRect(), on = Opt.hard;
       pill(c, r.x, r.y, r.w, r.h, 0.45);
@@ -2605,6 +2742,8 @@ STATES.TITLE = {
       const mw = uiMeasure(c, mlab, FSANS(12), 2);
       keycap(c, W - 72 - mw - 30, 486, 'M', 20);
       uiText(c, mlab, W - 72, 502, FSANS(12), Audio.muted ? PAL.amber : rgba(PAL.cream, 0.7), 'right', { spacing: 2 });
+      // a gesture has been and gone and the context still is not running: the same amber pip
+      if (Audio.gestured && Audio.needsUnlock) ell(c, W - 65, 491, 3, 3, PAL.amber, PAL.ink, 1);
     }
     if (showA2HS()) drawA2HS(c);
   },
@@ -2806,6 +2945,7 @@ STATES.WIN = {
 
 STATES.PAUSED = {
   enter() { Input.endTick(); },
+  exit() { Audio.resume(); },   // an iOS interruption usually lands here: pick the context back up
   update() {
     if (Input.pressed('Escape') || Input.pressed('KeyP')) { setState('PLAYING'); return; }
     if (Touch.on && Input.mouse.justDown) {
@@ -2888,6 +3028,8 @@ const GAME = {
   get bossHp() { for (const e of G.enemies) if (e.def.boss && !e.dead) return e.hp; return 0; },
   get version() { return VERSION; },
   get music() { return { mode: Music.mode, live: Music.live, audio: Audio.running, muted: Audio.muted }; },
+  get audioState() { return Audio.state; },                       // 'running' | 'suspended' | 'interrupted' | 'closed' | 'none'
+  unlockAudio() { Audio.unlock(); return Audio.state; },
   get heldKeys() { return Array.from(Input.keys); },   // focus-loss check: this must be empty after a blur
   get mouse() { return { x: Input.mouse.x, y: Input.mouse.y, down: Input.mouse.down }; },   // resize check: logical mouse
   get player() { const p = G.player; return { x: p.x, y: p.y, aim: p.aim, kvx: p.kvx, kvy: p.kvy, gun: p.gun.state, shells: p.gun.shells, hp: p.hp, god: p.god }; },
