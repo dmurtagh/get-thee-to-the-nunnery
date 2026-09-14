@@ -19,7 +19,7 @@ Object.assign(KEYS, {
   Backquote: { key: '`', vk: 192 }, Backspace: { key: 'Backspace', vk: 8 }, F1: { key: 'F1', vk: 112 }, F2: { key: 'F2', vk: 113 },
 });
 
-export async function launch({ width = 1280, height = 720, port = 9400 + Math.floor(Math.random() * 400), headless = true } = {}) {
+export async function launch({ width = 1280, height = 720, port = 9400 + Math.floor(Math.random() * 400), headless = true, deviceScaleFactor = 1, mobile = false, touch = false } = {}) {
   const profile = mkdtempSync(join(tmpdir(), 'nunnery-chrome-'));
   const args = [
     `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
@@ -72,7 +72,8 @@ export async function launch({ width = 1280, height = 720, port = 9400 + Math.fl
   on('Runtime.exceptionThrown', (p) => errors.push(p.exceptionDetails.exception?.description || p.exceptionDetails.text));
   on('Log.entryAdded', (p) => { if (p.entry.level === 'error') errors.push('log: ' + p.entry.text); });
   await send('Runtime.enable'); await send('Page.enable'); await send('Log.enable');
-  await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+  await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor, mobile });
+  if (touch) await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
 
   const api = {
     logs, errors, send, on, sleep,
@@ -104,6 +105,19 @@ export async function launch({ width = 1280, height = 720, port = 9400 + Math.fl
     async mouseDown(x, y, button = 'left') { await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, clickCount: 1, buttons: button === 'left' ? 1 : 2 }); },
     async mouseUp(x, y, button = 'left') { await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, clickCount: 1, buttons: 0 }); },
     async click(x, y, button = 'left') { await api.mouseMove(x, y); await api.mouseDown(x, y, button); await sleep(40); await api.mouseUp(x, y, button); },
+    // ---- touch. `points` is the full set of fingers currently on the glass (CSS px, viewport-relative);
+    // for touchEnd/touchCancel pass the ones that STAY down (empty = every finger lifts).
+    async touchEmulation(enabled = true) { await send('Emulation.setTouchEmulationEnabled', { enabled, maxTouchPoints: 5 }); },
+    async touch(points, type = 'touchStart') {
+      const list = (Array.isArray(points) ? points : [points]).map((p, i) => ({
+        x: Math.round(p.x), y: Math.round(p.y), id: p.id === undefined ? i + 1 : p.id, radiusX: 12, radiusY: 12, force: 1,
+      }));
+      await send('Input.dispatchTouchEvent', { type, touchPoints: list });
+    },
+    async tap(x, y, ms = 60, id = 1) { await api.touch([{ x, y, id }], 'touchStart'); await sleep(ms); await api.touch([], 'touchEnd'); },
+    async setViewport({ width: w, height: h, deviceScaleFactor: dsf = 1, mobile: mob = false }) {
+      await send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: dsf, mobile: mob });
+    },
     async close() { try { ws.close(); } catch {} proc.kill(); await sleep(150); rmSync(profile, { recursive: true, force: true }); },
   };
   return api;

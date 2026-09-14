@@ -2,11 +2,11 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <title>Get thee to a Nunnery</title>
 <style>
-html,body{margin:0;padding:0;background:#000;height:100%;overflow:hidden;-webkit-user-select:none;user-select:none}
-canvas#c{position:absolute;left:0;top:0;display:block;cursor:none;touch-action:none}
+html,body{margin:0;padding:0;background:#000;height:100%;overflow:hidden;-webkit-user-select:none;user-select:none;touch-action:none;overscroll-behavior:none}
+canvas#c{position:absolute;left:0;top:0;display:block;cursor:none;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none}
 </style>
 </head>
 <body>
@@ -86,10 +86,19 @@ const CONFIG = {
   HEARTBEAT_HP: 1, HEARTBEAT_T: 1.05, LOWHP_VIG: 0.16, WAVE_SLAM_SHAKE: 4, WAVE_SLAM_BELL: 0.5,
   // reticle + HUD readability (fixes 2, 9, 14)
   RETICLE_R_MIN: 9, RETICLE_R_MAX: 60, RETICLE_HOT_PAD_DEG: 6, MULT_SHOW_MIN: 1.001,
+  KILL_RANGE_PAD: 12,   // the reticle goes hot this far past a pellet's full-damage travel
   // pickups
   HEART_HEAL: 1, HEART_R: 10, HEART_LIFE: 14, HEART_BLINK: 3, HEART_DROP: 0.3,
   // debug drip spawner (GAME.debugSpawn only; the wave system owns the real spawns)
   SPAWN_EVERY: 2, SPAWN_N: 2,
+  // ---- MOBILE TOUCH: floating twin sticks, aim-to-fire, on-canvas buttons. All logical px.
+  // Left half of the canvas = move stick, right half = aim stick; the base lands under the finger.
+  STICK_R: 64, STICK_DEAD: 0.12, STICK_FULL: 0.85, STICK_FIRE: 0.35, STICK_KNOB_R: 22,
+  STICK_LW: 1.5, STICK_BASE_A: 0.35, STICK_KNOB_A: 0.6,
+  TAP_MS: 180, TAP_PX: 12,          // a tap on the aim half: one shot down the current aim
+  TOUCH_MOUSE_LOCK: 700,            // ignore the compatibility mouse events a tap emits behind it
+  TOUCH_BTN_R: 21, TOUCH_HIT: 64, TOUCH_BTN_X: 50, TOUCH_BTN_Y: 74, TOUCH_BTN_GAP: 68,
+  HAPTICS: true, HAPTIC_FIRE: 12, HAPTIC_HURT: 35,
 };
 
 const PAL = {
@@ -194,11 +203,12 @@ function rule(c, x, y, w, color) { c.fillStyle = color || PAL.amber; c.fillRect(
 // canvas + letterbox viewport
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
-const View = { scale: 1, offsetX: 0, offsetY: 0, dpr: 1 };
+const View = { scale: 1, offsetX: 0, offsetY: 0, dpr: 1, portrait: false };
 function resize() {
   const iw = window.innerWidth || CONFIG.W, ih = window.innerHeight || CONFIG.H;
   const s = Math.min(iw / CONFIG.W, ih / CONFIG.H);
   View.scale = s; View.dpr = Math.min(window.devicePixelRatio || 1, CONFIG.DPR_CAP);
+  View.portrait = ih > iw;   // a phone held upright: the touch build asks for a turn
   const cw = CONFIG.W * s, ch = CONFIG.H * s;
   View.offsetX = Math.floor((iw - cw) / 2); View.offsetY = Math.floor((ih - ch) / 2);
   canvas.style.width = cw + 'px'; canvas.style.height = ch + 'px';
@@ -207,6 +217,7 @@ function resize() {
   Input.refreshMouse();
 }
 window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 50));
 
 // persistence: localStorage with an in-memory fallback, never throws
 const Save = (() => {
@@ -224,6 +235,96 @@ const Save = (() => {
   return { get data() { return data; }, load, save };
 })();
 
+// ===================================================================== TOUCH
+// Mobile control layer. Two FLOATING sticks in logical canvas space: a touch that starts on the left
+// half is the move stick, one on the right half is the aim stick. Base under the finger, knob clamped
+// to STICK_R. Deflecting the aim stick past STICK_FIRE holds the trigger down the same path as LMB;
+// a tap on the right half fires one shell down the current aim. Desktop is untouched: nothing in here
+// runs until a real touch pointer arrives, and a mouse move afterwards hands control back.
+const Touch = {
+  on: false,            // touchMode: latched by the first touch pointerdown, dropped by a mouse move
+  move: null, aim: null, // the two live sticks (null = that finger is up; floating sticks show nothing at rest)
+  aimAng: 0,            // survives the finger lifting: she keeps looking where she was pointed
+  fireHeld: false, fireOnce: false, lastT: -1e9,
+};
+const nowMs = () => (window.performance && performance.now ? performance.now() : Date.now());
+// a phone should meet the touch title card, not a WASD hint it cannot use: guess at boot from the
+// pointer type, and let the first real mouse move take it straight back to the desktop build.
+function coarsePointer() {
+  try { return (navigator.maxTouchPoints || 0) > 0 && !!window.matchMedia && window.matchMedia('(pointer: coarse)').matches; }
+  catch (e) { return false; }
+}
+function newStick(id, x, y) {
+  const m = CONFIG.STICK_R * 0.5;   // keep the base on screen even if the thumb lands on a letterbox bar
+  const bx = clamp(x, m, CONFIG.W - m), by = clamp(y, m, CONFIG.H - m);
+  const s = { id, bx, by, kx: bx, ky: by, mag: 0, ang: 0, travel: 0, t0: nowMs() };
+  stickMove(s, x, y);
+  return s;
+}
+// knob follows the finger, clamped to STICK_R; a zero-length deflection keeps the last angle (never NaN)
+function stickMove(s, x, y) {
+  const dx = x - s.bx, dy = y - s.by, d = Math.hypot(dx, dy);
+  if (d > s.travel) s.travel = d;
+  s.mag = Math.min(1, d / CONFIG.STICK_R);
+  if (d > 1e-4) { s.ang = Math.atan2(dy, dx); s.kx = s.bx + (dx / d) * s.mag * CONFIG.STICK_R; s.ky = s.by + (dy / d) * s.mag * CONFIG.STICK_R; }
+  else { s.kx = s.bx; s.ky = s.by; }
+}
+// dead zone to 1.0 at STICK_FULL of the radius, smoothed: a thumb that barely leans does not sprint
+function stickAmount(mag) {
+  const d = CONFIG.STICK_DEAD, f = CONFIG.STICK_FULL;
+  if (!(mag > d)) return 0;
+  const t = clamp01((mag - d) / Math.max(1e-6, f - d));
+  return t * t * (3 - 2 * t);
+}
+function stickFor(id) { return Touch.move && Touch.move.id === id ? Touch.move : Touch.aim && Touch.aim.id === id ? Touch.aim : null; }
+function clearTouch() { Touch.move = null; Touch.aim = null; Touch.fireHeld = false; Touch.fireOnce = false; }
+function setTouchMode(v) {
+  v = !!v;
+  if (v === Touch.on) return v;
+  Touch.on = v;
+  if (v && G && G.player) Touch.aimAng = G.player.aim;   // start pointed where she is already looking
+  if (!v) clearTouch();
+  return v;
+}
+// aim angle tracks the knob past the dead zone; past STICK_FIRE the trigger is held
+function aimStickChanged() {
+  const s = Touch.aim; if (!s) return;
+  if (s.mag > CONFIG.STICK_DEAD) Touch.aimAng = s.ang;
+  const f = s.mag >= CONFIG.STICK_FIRE;
+  if (f && !Touch.fireHeld) Touch.fireOnce = true;   // the rising edge also feeds the fire buffer
+  Touch.fireHeld = f;
+}
+// on-canvas buttons, inside the arena's top-right corner: clear of the hearts, the thumbs and the notch.
+// PAUSE only exists in play; MUTE replaces the M keycap on the title card.
+const NO_BUTTONS = [];
+function touchButtons() {
+  if (!Touch.on || !G) return NO_BUTTONS;
+  const y = CONFIG.TOUCH_BTN_Y, x = CONFIG.W - CONFIG.TOUCH_BTN_X;
+  if (G.state === 'PLAYING') return [{ id: 'pause', x, y }, { id: 'mute', x: x - CONFIG.TOUCH_BTN_GAP, y }];
+  if (G.state === 'TITLE') return [{ id: 'mute', x, y }];
+  return NO_BUTTONS;
+}
+function touchButtonAt(lx, ly) {
+  if (!Touch.on) return null;
+  const h = CONFIG.TOUCH_HIT / 2;
+  for (const b of touchButtons()) if (lx >= b.x - h && lx <= b.x + h && ly >= b.y - h && ly <= b.y + h) return b.id;
+  return null;
+}
+function pressTouchButton(id) {
+  if (id === 'mute') { Audio.toggleMute(); Audio.click(); return; }
+  if (id === 'pause') { clearTouch(); Audio.click(); if (G && G.state === 'PLAYING') setState('PAUSED'); }
+}
+// portrait on a touch device: the sim is frozen behind a ROTATE YOUR PHONE overlay
+function rotateBlocked() { return Touch.on && !!View.portrait; }
+function haptic(ms) {
+  if (!Touch.on || !CONFIG.HAPTICS || Audio.muted) return;
+  try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) { /* haptics are optional */ }
+}
+const stickSnap = (s) => (s ? { bx: s.bx, by: s.by, kx: s.kx, ky: s.ky, mag: s.mag, ang: s.ang } : null);
+function touchSnapshot() {
+  return { move: stickSnap(Touch.move), aim: stickSnap(Touch.aim), aimAngle: Touch.aimAng, fire: Touch.fireHeld, portrait: !!View.portrait };
+}
+
 // ===================================================================== INPUT
 // Listeners on window so aim works over the letterbox bars and CDP-dispatched events land without focus.
 const Input = (() => {
@@ -239,22 +340,83 @@ const Input = (() => {
     Audio.unlock();
   });
   window.addEventListener('keyup', (e) => { keys.delete(e.code); });
-  window.addEventListener('mousemove', (e) => { mouse.cx = e.clientX; mouse.cy = e.clientY; refreshMouse(); });
+  // a tap emits compatibility mouse events behind it: swallow those, but let a REAL mouse move
+  // hand control back to the desktop path (touchMode off again).
+  const mouseLocked = () => Touch.on && nowMs() - Touch.lastT < CONFIG.TOUCH_MOUSE_LOCK;
+  window.addEventListener('mousemove', (e) => {
+    if (mouseLocked()) return;
+    if (Touch.on) { if (e.clientX === mouse.cx && e.clientY === mouse.cy) return; setTouchMode(false); }
+    mouse.cx = e.clientX; mouse.cy = e.clientY; refreshMouse();
+  });
   window.addEventListener('mousedown', (e) => {
+    if (mouseLocked()) return;
     mouse.cx = e.clientX; mouse.cy = e.clientY; refreshMouse();
     if (e.button === 0) { mouse.down = true; mouse.justDown = true; }
     Audio.unlock();
   });
-  window.addEventListener('mouseup', (e) => { if (e.button === 0) mouse.down = false; });
+  window.addEventListener('mouseup', (e) => { if (mouseLocked()) return; if (e.button === 0) mouse.down = false; });
   window.addEventListener('contextmenu', (e) => e.preventDefault());
-  function clear() { keys.clear(); justPressed.clear(); mouse.down = false; mouse.justDown = false; }
+
+  // ---- pointer events (touch only): the twin sticks, the canvas buttons, and taps as clicks
+  function onDown(e) {
+    if (e.pointerType !== 'touch') return;
+    Touch.lastT = nowMs();
+    if (e.cancelable) e.preventDefault();
+    setTouchMode(true);
+    Audio.unlock();
+    if (rotateBlocked()) return;                 // the rotate overlay eats every touch
+    const [lx, ly] = toLogical(e.clientX, e.clientY);
+    const btn = touchButtonAt(lx, ly);           // a button eats its own tap, in every state it is drawn
+    if (btn) { pressTouchButton(btn); return; }
+    if (G && G.state === 'PLAYING') {
+      let half = lx < CONFIG.W / 2 ? 'move' : 'aim';
+      if (Touch[half]) half = half === 'move' ? 'aim' : 'move';   // that half is busy: take the free one
+      if (Touch[half]) return;                                    // both busy: a third finger does nothing
+      Touch[half] = newStick(e.pointerId, lx, ly);
+      if (half === 'aim') aimStickChanged();
+      return;
+    }
+    // every other state (title, cards, pause, retry, encore): a tap IS a click
+    mouse.cx = e.clientX; mouse.cy = e.clientY; refreshMouse();
+    mouse.down = true; mouse.justDown = true;
+  }
+  function onMove(e) {
+    if (e.pointerType !== 'touch') return;
+    Touch.lastT = nowMs();
+    if (e.cancelable) e.preventDefault();
+    const s = stickFor(e.pointerId);
+    if (s) { const [lx, ly] = toLogical(e.clientX, e.clientY); stickMove(s, lx, ly); if (s === Touch.aim) aimStickChanged(); return; }
+    if (!G || G.state !== 'PLAYING') { mouse.cx = e.clientX; mouse.cy = e.clientY; refreshMouse(); }
+  }
+  function onUp(e, cancelled) {
+    if (e.pointerType !== 'touch') return;
+    Touch.lastT = nowMs();
+    if (e.cancelable) e.preventDefault();
+    mouse.down = false;
+    const s = stickFor(e.pointerId);
+    if (!s) return;
+    if (s === Touch.aim) {
+      // a tap (short, barely moved) is one shell down the current aim
+      if (!cancelled && nowMs() - s.t0 <= CONFIG.TAP_MS && s.travel < CONFIG.TAP_PX) Touch.fireOnce = true;
+      Touch.aim = null; Touch.fireHeld = false;
+    } else Touch.move = null;
+  }
+  window.addEventListener('pointerdown', onDown, { passive: false });
+  window.addEventListener('pointermove', onMove, { passive: false });
+  window.addEventListener('pointerup', (e) => onUp(e, false), { passive: false });
+  window.addEventListener('pointercancel', (e) => onUp(e, true), { passive: false });
+
+  function clear() { keys.clear(); justPressed.clear(); mouse.down = false; mouse.justDown = false; clearTouch(); }
   // focus loss clears every held key (no stuck movement) and pauses; a hidden tab also stops the audio
   // graph until the next input, which calls Audio.unlock() and resumes it.
   window.addEventListener('blur', () => { clear(); onFocusLost(); });
   document.addEventListener('visibilitychange', () => { if (document.hidden) { clear(); onFocusLost(); Audio.suspend(); } });
-  function endTick() { justPressed.clear(); mouse.justDown = false; }
+  function endTick() { justPressed.clear(); mouse.justDown = false; Touch.fireOnce = false; }
   const pressed = (code) => justPressed.has(code);
   const held = (code) => keys.has(code);
+  // the gun reads these two, never the mouse directly: LMB and the aim stick are the same trigger
+  const fireHeld = () => mouse.down || Touch.fireHeld;
+  const firePressed = () => mouse.justDown || Touch.fireOnce;
   function axis() {
     let x = 0, y = 0;
     if (keys.has('KeyA') || keys.has('ArrowLeft')) x -= 1;
@@ -263,8 +425,19 @@ const Input = (() => {
     if (keys.has('KeyS') || keys.has('ArrowDown')) y += 1;
     return [x, y];
   }
+  // unit-ish move vector: digital from the keys, analog from the move stick
+  function moveVec() {
+    if (Touch.on && Touch.move) {
+      const s = Touch.move, a = stickAmount(s.mag);
+      return a > 0 ? [Math.cos(s.ang) * a, Math.sin(s.ang) * a, true] : [0, 0, false];
+    }
+    const [x, y] = axis();
+    if (x === 0 && y === 0) return [0, 0, false];
+    const [nx, ny] = norm(x, y);
+    return [nx, ny, true];
+  }
   const anyStart = () => mouse.justDown || justPressed.has('Enter') || justPressed.has('Space');
-  return { keys, justPressed, mouse, clear, endTick, pressed, held, axis, anyStart, refreshMouse };
+  return { keys, justPressed, mouse, clear, endTick, pressed, held, axis, moveVec, fireHeld, firePressed, anyStart, refreshMouse, toLogical };
 })();
 
 // ===================================================================== AUDIO
@@ -1171,16 +1344,23 @@ function newPlayer() {
   };
 }
 
+// how far a pellet still kills: the reticle's hot ring, and where the touch reticle sits
+const killRangeOf = (p) => p.stats.pelletSpeed * p.stats.fullT + CONFIG.KILL_RANGE_PAD;
 function updatePlayer(dt) {
   const p = G.player;
-  // aim
-  const [ax, ay, ad] = norm(Input.mouse.x - p.x, Input.mouse.y - p.y);
-  p.aimX = ax; p.aimY = ay; p.aimDist = ad; p.aim = Math.atan2(ay, ax); p.facing = ax < 0 ? -1 : 1;
+  // aim: the mouse on desktop, the right thumb stick on touch (parked at kill range so the hot/cold cue holds)
+  if (Touch.on) {
+    const a = Touch.aimAng;
+    p.aimX = Math.cos(a); p.aimY = Math.sin(a); p.aimDist = killRangeOf(p); p.aim = a; p.facing = p.aimX < 0 ? -1 : 1;
+  } else {
+    const [ax, ay, ad] = norm(Input.mouse.x - p.x, Input.mouse.y - p.y);
+    p.aimX = ax; p.aimY = ay; p.aimDist = ad; p.aim = Math.atan2(ay, ax); p.facing = ax < 0 ? -1 : 1;
+  }
   // move + knock
-  const [mx, my] = Input.axis(); const moving = mx !== 0 || my !== 0; const [nx, ny] = norm(mx, my);
+  const [nx, ny, moving] = Input.moveVec();
   p.moving = moving; if (moving) p.walkT += dt;
-  p.x += ((moving ? nx * CONFIG.NUN_SPEED : 0) + p.kvx) * dt;
-  p.y += ((moving ? ny * CONFIG.NUN_SPEED : 0) + p.kvy) * dt;
+  p.x += (nx * CONFIG.NUN_SPEED + p.kvx) * dt;
+  p.y += (ny * CONFIG.NUN_SPEED + p.kvy) * dt;
   p.kvx *= CONFIG.FRICTION; p.kvy *= CONFIG.FRICTION;
   // clamp to the arena; kill knock velocity into the wall
   const B = CONFIG.BORDER + p.r;
@@ -1201,10 +1381,10 @@ function updatePlayer(dt) {
 function updateGun(dt) {
   const p = G.player, g = p.gun, s = p.stats;
   // a button already held when PLAYING begins (title click, card pick) must not fire until released once
-  if (!Input.mouse.down) g.holdBlock = false;
+  if (!Input.fireHeld()) g.holdBlock = false;
   // a tap in the last FIRE_BUFFER_T of the pump (or of the shell going in) is remembered and fires the instant the gun is ready
-  if (Input.mouse.justDown && g.state !== 'READY' && g.timer <= CONFIG.FIRE_BUFFER_T) g.buffered = true;
-  const wantFire = Input.mouse.justDown || (Input.mouse.down && !g.holdBlock) || g.buffered;
+  if (Input.firePressed() && g.state !== 'READY' && g.timer <= CONFIG.FIRE_BUFFER_T) g.buffered = true;
+  const wantFire = Input.firePressed() || (Input.fireHeld() && !g.holdBlock) || g.buffered;
   if (g.state === 'READY') {
     if (wantFire && g.shells > 0) fire(); // fire() eats the buffer, so a buffered tap can never double up with the hold
     else { g.buffered = false; if (g.shells === 0 || (Input.pressed('KeyR') && g.shells < s.shells)) { g.state = 'LOADING'; g.timer = s.shellT; } }
@@ -1249,6 +1429,7 @@ function fire() {
   FX.burst(mx, my, 6, { angle: p.aim, arc: 0.5, minSpeed: 300, maxSpeed: 600, minLife: 0.05, maxLife: 0.12, color: [PAL.muzzle, PAL.amber], minSize: 2, maxSize: 3, drag: 0.85 });
   spawnCasing(p);
   Audio.blast();
+  haptic(CONFIG.HAPTIC_FIRE);
 }
 function updatePellets(dt) {
   const B = CONFIG.BORDER, W = CONFIG.W, H = CONFIG.H, ps = G.pellets, es = G.enemies;
@@ -1509,7 +1690,7 @@ function hurt(src) {
   const v = impulseFor(CONFIG.HURT_SHOVE_PX); p.kvx += dx * v; p.kvy += dy * v;
   FX.hurt(); FX.shake(8, 0.2);
   G.timeScale = CONFIG.HURT_SLOWMO; G.slowmoT = CONFIG.HURT_SLOWMO_T;
-  Audio.hurt();
+  Audio.hurt(); haptic(CONFIG.HAPTIC_HURT);
   if (p.hp <= 0) { p.hp = 0; setState('GAMEOVER'); }
 }
 // one drawImage per body: the sprite (both frames + a white silhouette) was pre-rendered at boot.
@@ -1924,6 +2105,7 @@ const STATES = {};
 function setState(name) {
   if (!STATES[name]) return;
   const old = G.state;
+  if (old === 'PLAYING') clearTouch();   // leaving play drops both thumbs and the trigger
   if (STATES[old] && STATES[old].exit) STATES[old].exit(name);
   G.state = name;
   if (STATES[name].enter) STATES[name].enter(old);
@@ -1999,7 +2181,7 @@ function drawReticle(c, x, y, dist, inRange, halfDeg) {
 }
 function drawPlayerReticle(c) {
   const p = G.player, m = Input.mouse;
-  const killRange = p.stats.pelletSpeed * p.stats.fullT + 12;
+  const killRange = killRangeOf(p);
   let hot = false;
   // hot means "this shot kills that body": in range AND inside the cone, not merely near her
   const cosLimit = Math.cos(((p.stats.spread / 2 + CONFIG.RETICLE_HOT_PAD_DEG) * Math.PI) / 180);
@@ -2010,7 +2192,65 @@ function drawPlayerReticle(c) {
     const [ex, ey] = norm(e.x - p.x, e.y - p.y);
     if (ex * p.aimX + ey * p.aimY > cosLimit) { hot = true; break; }
   }
-  drawReticle(c, m.x, m.y, p.aimDist, hot, p.stats.spread / 2);
+  // touch has no cursor: the reticle rides the aim ray at kill range, so the hot/cold cue still reads
+  if (Touch.on) drawReticle(c, p.x + p.aimX * killRange, p.y + p.aimY * killRange, p.aimDist, hot, p.stats.spread / 2);
+  else drawReticle(c, m.x, m.y, p.aimDist, hot, p.stats.spread / 2);
+}
+
+// ---------------------------------------------------------------- touch overlay (sticks, buttons, rotate)
+function drawStick(c, s, col, fireRing) {
+  if (!s) return;
+  c.save();
+  c.lineWidth = CONFIG.STICK_LW; c.strokeStyle = col;
+  c.globalAlpha = CONFIG.STICK_BASE_A;
+  c.beginPath(); c.arc(s.bx, s.by, CONFIG.STICK_R, 0, TAU); c.stroke();
+  if (fireRing) {   // the faint inner ring is the trigger: past it, she is firing
+    c.globalAlpha = CONFIG.STICK_BASE_A * 0.55;
+    c.beginPath(); c.arc(s.bx, s.by, CONFIG.STICK_R * CONFIG.STICK_FIRE, 0, TAU); c.stroke();
+  }
+  c.globalAlpha = CONFIG.STICK_KNOB_A; c.fillStyle = col;
+  c.beginPath(); c.arc(s.kx, s.ky, CONFIG.STICK_KNOB_R, 0, TAU); c.fill();
+  c.globalAlpha = 1; c.strokeStyle = PAL.ink; c.lineWidth = 1.5;
+  c.beginPath(); c.arc(s.kx, s.ky, CONFIG.STICK_KNOB_R, 0, TAU); c.stroke();
+  c.restore();
+}
+function drawTouchButton(c, b) {
+  const R = CONFIG.TOUCH_BTN_R;
+  ell(c, b.x, b.y + 2, R, R, 'rgba(0,0,0,0.45)');
+  ell(c, b.x, b.y, R, R, 'rgba(7,7,13,0.55)', rgba(PAL.cream, 0.5), 1.5);
+  const col = rgba(PAL.cream, 0.9);
+  if (b.id === 'pause') { c.fillStyle = col; c.fillRect(b.x - 6.5, b.y - 8, 4.5, 16); c.fillRect(b.x + 2, b.y - 8, 4.5, 16); }
+  else {
+    c.fillStyle = Audio.muted ? rgba(PAL.amber, 0.9) : col;
+    c.fillRect(b.x - 9, b.y - 3.5, 5, 7);
+    c.beginPath(); c.moveTo(b.x - 4, b.y - 3.5); c.lineTo(b.x + 2, b.y - 9); c.lineTo(b.x + 2, b.y + 9); c.lineTo(b.x - 4, b.y + 3.5); c.closePath(); c.fill();
+    c.strokeStyle = c.fillStyle; c.lineWidth = 2; c.lineCap = 'round';
+    c.beginPath();
+    if (Audio.muted) { c.moveTo(b.x + 5, b.y - 5); c.lineTo(b.x + 11, b.y + 5); c.moveTo(b.x + 11, b.y - 5); c.lineTo(b.x + 5, b.y + 5); }
+    else { c.arc(b.x + 3, b.y, 7, -0.9, 0.9); }
+    c.stroke();
+  }
+}
+function drawTouchUI(c) {
+  if (!Touch.on) return;
+  for (const b of touchButtons()) drawTouchButton(c, b);
+  drawStick(c, Touch.move, PAL.cream, false);
+  drawStick(c, Touch.aim, PAL.amber, true);
+}
+// portrait phone: hold everything and ask for a turn (the sim is frozen while this is up)
+function drawRotate(c) {
+  const W = CONFIG.W, H = CONFIG.H;
+  c.fillStyle = 'rgba(7,7,13,0.92)'; c.fillRect(0, 0, W, H);
+  const k = 0.5 - 0.5 * Math.cos(clamp01((RT % 2.4) / 1.2) * Math.PI);   // roll upright -> sideways and back
+  c.save();
+  c.translate(W / 2, H / 2 - 36); c.rotate(-k * Math.PI / 2);
+  rrect(c, -34, -58, 68, 116, 10, '#22233a', rgba(PAL.cream, 0.7), 2.5);
+  rrect(c, -26, -46, 52, 84, 4, rgba(PAL.cream, 0.18));
+  ell(c, 0, 47, 4.5, 4.5, rgba(PAL.cream, 0.6));
+  c.restore();
+  uiText(c, 'ROTATE YOUR PHONE', W / 2, H / 2 + 74, FSANS(26), PAL.cream, 'center', { spacing: 5, shadow: 2 });
+  rule(c, W / 2 - 44, H / 2 + 94, 88);
+  uiText(c, 'THIS COURTYARD IS PLAYED IN LANDSCAPE', W / 2, H / 2 + 126, FSANS(13), rgba(PAL.cream, pulse(RT, 0.7, 0.5, 1)), 'center', { spacing: 3 });
 }
 
 // HUD: plain data in, no game state (ui-scratch.html). Never leaves the 40 px bands top and bottom.
@@ -2105,7 +2345,8 @@ STATES.TITLE = {
     uiText(c, 'A NUNNERY', 68, 244, FSERIF(98), PAL.cream, 'left', { shadow: 4 });
     rule(c, 72, 262, 380);
     uiText(c, 'She took the advice.', 74, 302, FSERIF(28, true), PAL.amber, 'left', { shadow: 2 });
-    uiText(c, 'WASD MOVE   ·   MOUSE AIM   ·   CLICK TO BEGIN', 74, 350, FSANS(13), rgba(PAL.cream, pulse(t, 0.7, 0.5, 1)), 'left', { spacing: 2, shadow: 1 });
+    const hint = Touch.on ? 'LEFT THUMB MOVE   ·   RIGHT THUMB AIM & FIRE   ·   TAP TO BEGIN' : 'WASD MOVE   ·   MOUSE AIM   ·   CLICK TO BEGIN';
+    uiText(c, hint, 74, 350, FSANS(13), rgba(PAL.cream, pulse(t, 0.7, 0.5, 1)), 'left', { spacing: 2, shadow: 1 });
     if (hardUnlocked()) {
       const r = hardPillRect(), on = Opt.hard;
       pill(c, r.x, r.y, r.w, r.h, 0.45);
@@ -2115,10 +2356,14 @@ STATES.TITLE = {
     }
     const s = Save.data;
     uiText(c, 'BEST ' + fmt(s.hi) + '   ·   WAVE ' + (s.bestWave || 0), 72, 504, FSANS(14), rgba(PAL.cream, 0.85), 'left', { spacing: 1.5, shadow: 1 });
-    const mlab = Audio.muted ? 'MUTED' : 'MUTE';
-    const mw = uiMeasure(c, mlab, FSANS(12), 2);
-    keycap(c, W - 72 - mw - 30, 486, 'M', 20);
-    uiText(c, mlab, W - 72, 502, FSANS(12), Audio.muted ? PAL.amber : rgba(PAL.cream, 0.7), 'right', { spacing: 2 });
+    // the touch build has a mute button on the canvas; the keycap hint would be a lie there
+    if (!Touch.on) {
+      const mlab = Audio.muted ? 'MUTED' : 'MUTE';
+      const mw = uiMeasure(c, mlab, FSANS(12), 2);
+      keycap(c, W - 72 - mw - 30, 486, 'M', 20);
+      uiText(c, mlab, W - 72, 502, FSANS(12), Audio.muted ? PAL.amber : rgba(PAL.cream, 0.7), 'right', { spacing: 2 });
+    }
+    drawTouchUI(c);
   },
 };
 
@@ -2156,6 +2401,7 @@ STATES.PLAYING = {
     drawHUD(c, hudData());
     if (G.waveCardT > 0) drawWaveCard(c, CONFIG.WAVE_CARD_T - G.waveCardT, waveName(G.wave), waveSub(G.wave));
     drawPlayerReticle(c);
+    drawTouchUI(c);   // sticks and buttons sit above the HUD
   },
 };
 
@@ -2219,7 +2465,7 @@ function drawGameOver(c, t, d) {
     c.restore();
   }
   if (d.newUnlock) drawNewUnlocks(c, qy + 208);
-  uiText(c, 'CLICK TO RETRY', W / 2, 482, FSANS(13), rgba(PAL.cream, pulse(t, 0.7, 0.45, 1)), 'center', { spacing: 4 });
+  uiText(c, Touch.on ? 'TAP TO RETRY' : 'CLICK TO RETRY', W / 2, 482, FSANS(13), rgba(PAL.cream, pulse(t, 0.7, 0.45, 1)), 'center', { spacing: 4 });
 }
 // WIN: confetti, the crown on the flagstones, and the line
 function drawCrown(c, x, y, s, rot) {
@@ -2238,7 +2484,7 @@ function drawWin(c, t, d) {
   rrect(c, W / 2 - 370, 160, 740, 152, 8, 'rgba(7,7,13,0.55)');
   uiText(c, 'THE REST IS SILENCE.', W / 2, 226, FSERIF(56), PAL.cream, 'center', { shadow: 3, spacing: 1 });
   rule(c, W / 2 - 44, 244, 88);
-  uiText(c, 'ENCORE?  CLICK   ·   ESC TO BOW', W / 2, 286, FSANS(14), rgba(PAL.cream, pulse(t, 0.7, 0.5, 1)), 'center', { spacing: 3 });
+  uiText(c, Touch.on ? 'ENCORE?  TAP TO TAKE IT' : 'ENCORE?  CLICK   ·   ESC TO BOW', W / 2, 286, FSANS(14), rgba(PAL.cream, pulse(t, 0.7, 0.5, 1)), 'center', { spacing: 3 });
   uiText(c, 'SCORE ' + fmt(d.score), W / 2, 372, FSANS(28), PAL.cream, 'center', { spacing: 2, shadow: 2 });
   if (d.best != null) uiText(c, 'BEST ' + fmt(d.best), W / 2, 400, FSANS(14), rgba(PAL.cream, 0.7), 'center', { spacing: 3 });
   if (d.newUnlock) drawNewUnlocks(c, 440);
@@ -2248,7 +2494,7 @@ function drawPause(c) {
   dim(c, 0.6); FX.vignette(c, 0.5);
   uiText(c, 'PAUSED', W / 2, H / 2 - 4, FSANS(40), PAL.cream, 'center', { spacing: 12, shadow: 3 });
   rule(c, W / 2 - 44, H / 2 + 14, 88);
-  uiText(c, 'ESC OR P TO RESUME', W / 2, H / 2 + 48, FSANS(13), rgba(PAL.cream, 0.75), 'center', { spacing: 4 });
+  uiText(c, Touch.on ? 'TAP TO RESUME' : 'ESC OR P TO RESUME', W / 2, H / 2 + 48, FSANS(13), rgba(PAL.cream, 0.75), 'center', { spacing: 4 });
 }
 
 const QUOTES = ['Goodnight, sweet nun.', 'Alas, poor Ophelia.', 'Get thee BACK to a nunnery.', 'Frailty, thy name is three hearts.', 'Something is rotten in Denmark. Mostly you.', 'The rest is silence. Until you click.'];
@@ -2371,7 +2617,10 @@ const GAME = {
   get player() { const p = G.player; return { x: p.x, y: p.y, aim: p.aim, kvx: p.kvx, kvy: p.kvy, gun: p.gun.state, shells: p.gun.shells, hp: p.hp, god: p.god }; },
   get enemyList() { return G.enemies.filter((e) => !e.dead).map((e) => ({ id: e.id, type: e.type, x: Math.round(e.x), y: Math.round(e.y), hp: e.hp, kv: Math.round(Math.hypot(e.kvx, e.kvy)) })); },
   get pelletList() { return G.pellets.map((b) => ({ x: Math.round(b.x), y: Math.round(b.y), age: b.age })); },
-  get viewport() { return { scale: View.scale, offsetX: View.offsetX, offsetY: View.offsetY, dpr: View.dpr }; },
+  get viewport() { return { scale: View.scale, offsetX: View.offsetX, offsetY: View.offsetY, dpr: View.dpr, portrait: !!View.portrait }; },
+  get touchMode() { return Touch.on; }, set touchMode(v) { setTouchMode(v); },
+  get sticks() { return touchSnapshot(); },
+  get rotatePrompt() { return rotateBlocked(); },
   get debugSpawn() { return G.debugSpawn; }, set debugSpawn(v) { G.debugSpawn = !!v; },
   get dummies() { return G.dummies; }, set dummies(v) { G.dummies = !!v; },
   toScreen(x, y) { return { x: View.offsetX + x * View.scale, y: View.offsetY + y * View.scale }; },
@@ -2432,7 +2681,7 @@ function draw() {
   const s = View.scale * View.dpr;
   ctx.setTransform(s, 0, 0, s, 0, 0);
   ctx.fillStyle = PAL.floor; ctx.fillRect(0, 0, CONFIG.W, CONFIG.H);
-  try { STATES[G.state].draw(ctx); drawFails = 0; }
+  try { STATES[G.state].draw(ctx); if (rotateBlocked()) drawRotate(ctx); drawFails = 0; }
   catch (err) {
     if (drawFails++ === 0) console.error('draw failed', err);   // log the streak once, not every frame
     try { ctx.restore(); } catch (e2) { /* the throw may have left a save() open */ }
@@ -2454,6 +2703,8 @@ function frame(now) {
   decalBudget = CONFIG.DECALS_PER_FRAME;
   Music.set(G.state === 'PLAYING' ? 'play' : G.state === 'TITLE' || G.state === 'UPGRADE' ? 'drone' : 'off', G.wave || 1);
   Music.update();
+  // portrait phone: the whole sim holds behind the ROTATE overlay, and picks up where it left off
+  if (rotateBlocked()) { clearTouch(); Input.endTick(); acc = 0; draw(); Perf.frameMs = Perf.frameMs * 0.9 + (performance.now() - t0) * 0.1; return; }
   if (G.slowmoT > 0) { G.slowmoT -= dt; if (G.slowmoT <= 0) G.timeScale = G.baseTimeScale; }
   // wave-end and boss-death slow-mo run on render time, so 0.4 s means 0.4 s no matter how slow the sim is
   if (G.state === 'PLAYING') {
@@ -2475,6 +2726,7 @@ function boot() {
   Save.load(); Audio.setMuted(Save.data.mute);
   G = newGame();
   FX.prerender(); buildSprites(); Floor.build(); resize();
+  if (coarsePointer()) setTouchMode(true);
   setState('TITLE');
   requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
 }
