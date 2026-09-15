@@ -119,6 +119,23 @@ const CONFIG = {
   FIRE_PILL_W: 268, FIRE_PILL_H: 40, FIRE_PILL_Y: 344,   // the FIRE: FLICK / HOLD pill on the pause card
   ROTATE_CARD_W: 430, ROTATE_CARD_H: 390,   // the ROTATE card's own box, fitted to the screen
   HAPTICS: true, HAPTIC_FIRE: 12, HAPTIC_FLICK: 20, HAPTIC_HURT: 35,
+  // ---- THE PLAYBILL (global leaderboard). Cloud Firestore over its plain REST API, no SDK.
+  // projectId/apiKey are public by design: the security rules are what guard the collection (anyone
+  // may read, and CREATE one document of exactly {name, score, wave, v}; nothing may be changed).
+  LEADERBOARD: {
+    enabled: true,
+    projectId: 'nunnery-leaderboard-232e',
+    apiKey: 'AIzaSyAut-bwOoEea341fxUBXuyw19eTKYlpt1o',
+    collection: 'scores',
+    timeoutMs: 6000,
+    version: 1,
+    top: 10,
+    cacheMs: 60000,          // the top ten is re-read at most once a minute
+    retryMs: 8000,           // ...but a FAILED read is allowed to be retried much sooner
+  },
+  // the panel on the title poster, and the arcade initials entry on the end cards
+  LB_PANEL_X: 652, LB_PANEL_Y: 34, LB_PANEL_W: 284, LB_PANEL_H: 282, LB_ROW_STEP: 21, LB_ROW_TOP: 76,
+  LB_SLOT_W: 50, LB_SLOT_H: 56, LB_SLOT_GAP: 14, LB_PILL_H: 32, LB_PILL_GAP: 16,
 };
 
 const PAL = {
@@ -288,7 +305,7 @@ document.addEventListener('fullscreenchange', () => setTimeout(resize, 50));
 // persistence: localStorage with an in-memory fallback, never throws
 const Save = (() => {
   const KEY = 'nunnery.v1';
-  const def = () => ({ hi: 0, bestWave: 0, kills: 0, runs: 0, wins: 0, unlocks: [], mute: false, touchFire: CONFIG.TOUCH_FIRE_MODE, hints: {} });
+  const def = () => ({ hi: 0, bestWave: 0, kills: 0, runs: 0, wins: 0, unlocks: [], mute: false, touchFire: CONFIG.TOUCH_FIRE_MODE, hints: {}, initials: 'AAA' });
   let data = def();
   function load() {
     try {
@@ -299,6 +316,135 @@ const Save = (() => {
   }
   function save() { try { localStorage.setItem(KEY, JSON.stringify(data)); } catch (e) { /* private mode / quota: keep in memory */ } }
   return { get data() { return data; }, load, save };
+})();
+
+// ===================================================================== LEADERBOARD
+// THE PLAYBILL: the global top ten, on Cloud Firestore's plain REST API. No SDK, no bundler, still
+// one file. Two calls only: a :runQuery for the top ten (single-field ordering needs no index) and
+// a POST that CREATES one score document. The rules on the server are the real validation.
+//
+// Three rules hold this whole section together:
+//   1. gameplay NEVER waits on the network - every call is fire-and-forget and the frame loop
+//      reads plain values that are already there;
+//   2. nothing here may reach the console as an error or escape as an unhandled rejection - a dead
+//      backend, a blocked host, a captive portal and file:// all look the same: the board is OFF;
+//   3. one console.warn per session, at most, so a broken backend cannot spam a player's log.
+const LB = (() => {
+  const CF = CONFIG.LEADERBOARD;
+  // the ONE host this build is allowed to talk to (tools/check.mjs enforces exactly this string)
+  const HOST = 'https://firestore.googleapis.com/v1';
+  let collection = CF.collection;
+  let top = null;           // null = never read / last read failed; [] = read fine, board empty
+  let topAt = -1e9, inflight = null, loading = false, lastError = null, warned = false;
+
+  const base = () => HOST + '/projects/' + CF.projectId + '/databases/(default)/documents';
+  const key = () => 'key=' + encodeURIComponent(CF.apiKey);
+  function warn(e) {
+    lastError = String((e && e.message) || e || 'error');
+    // once. A leaderboard is a nicety; it never gets to shout, and never as an error.
+    if (!warned) { warned = true; try { console.warn('the playbill is unreachable: ' + lastError); } catch (e2) { /* no console */ } }
+  }
+  function onLine() { try { return navigator.onLine !== false; } catch (e) { return true; } }
+  function httpish() { try { return location.protocol === 'http:' || location.protocol === 'https:'; } catch (e) { return false; } }
+  // from file:// (the jam build opened off disk) or offline there is no board at all, and we never
+  // even try: a failed cross-origin fetch is a console error we do not control.
+  function canFetch() { try { return typeof fetch === 'function'; } catch (e) { return false; } }
+  function available() { return !!CF.enabled && canFetch() && httpish() && onLine(); }
+
+  // one POST, JSON in and JSON out, abandoned after timeoutMs. Rejects - never throws - so the
+  // caller's rejection handler is the only place a failure can ever land.
+  function post(url, body) {
+    try {
+      let ctrl = null, timer = 0;
+      try { ctrl = new AbortController(); } catch (e) { ctrl = null; }
+      const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+      if (ctrl) {
+        opts.signal = ctrl.signal;
+        timer = setTimeout(() => { try { ctrl.abort(); } catch (e) { /* already settled */ } }, CF.timeoutMs);
+      }
+      const done = () => { if (timer) { clearTimeout(timer); timer = 0; } };
+      return fetch(url, opts).then(
+        (r) => { done(); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); },
+        (e) => { done(); throw e; },
+      );
+    } catch (e) { return Promise.reject(e); }
+  }
+  // a :runQuery row is { document: { fields: { name:{stringValue}, score:{integerValue:"123"} ... } } }
+  // and rows with no `document` at all are legal: skip them rather than trusting the shape.
+  function parseRows(rows) {
+    const out = [];
+    if (!Array.isArray(rows)) return out;
+    for (const r of rows) {
+      const f = r && r.document && r.document.fields;
+      if (!f) continue;
+      const name = f.name && typeof f.name.stringValue === 'string' ? f.name.stringValue.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 3) : '';
+      const score = f.score ? parseInt(f.score.integerValue, 10) : NaN;
+      const wave = f.wave ? parseInt(f.wave.integerValue, 10) : NaN;
+      if (!name || !isFinite(score)) continue;
+      out.push({ name, score, wave: isFinite(wave) ? wave : 0 });
+    }
+    out.sort((a, b) => b.score - a.score);
+    return out.slice(0, CF.top);
+  }
+  // cached for cacheMs, in-flight deduped. ALWAYS resolves (null on any failure), never rejects.
+  function fetchTop(force) {
+    if (!available()) { top = null; loading = false; return Promise.resolve(null); }
+    const now = Date.now();
+    const fresh = top && now - topAt < CF.cacheMs;
+    if (!force && fresh) return Promise.resolve(top);
+    if (!force && !top && now - topAt < CF.retryMs) return Promise.resolve(null);   // a fresh failure: let it rest
+    if (inflight) return inflight;
+    loading = true;
+    const body = { structuredQuery: { from: [{ collectionId: collection }], orderBy: [{ field: { fieldPath: 'score' }, direction: 'DESCENDING' }], limit: CF.top } };
+    inflight = post(base() + ':runQuery?' + key(), body).then(
+      (rows) => { top = parseRows(rows); topAt = Date.now(); lastError = null; loading = false; inflight = null; return top; },
+      (e) => { warn(e); top = null; topAt = Date.now(); loading = false; inflight = null; return null; },
+    );
+    return inflight;
+  }
+  // A-Z 0-9, three characters, exactly what the server rules will accept
+  function cleanName(s) { return String(s == null ? '' : s).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 3); }
+  // one CREATE. Resolves true/false; the caller decides what to say about it.
+  function submit(name, score, wave) {
+    const n = cleanName(name);
+    const s = clamp(Math.round(+score || 0), 0, 2000000) | 0;
+    const w = clamp(Math.round(+wave || 1), 1, 200) | 0;
+    if (!available() || !n) return Promise.resolve(false);
+    const body = { fields: { name: { stringValue: n }, score: { integerValue: String(s) }, wave: { integerValue: String(w) }, v: { integerValue: String(CF.version | 0) } } };
+    return post(base() + '/' + collection + '?' + key(), body).then(
+      () => { top = null; topAt = -1e9; lastError = null; return true; },   // the board just moved: drop the cache
+      (e) => { warn(e); return false; },
+    );
+  }
+  // 'off' | 'loading' | 'error' | 'empty' | 'ready' - the four things the panel can say
+  function status() {
+    if (!available()) return 'off';
+    if (top) return top.length ? 'ready' : 'empty';
+    return loading ? 'loading' : (lastError ? 'error' : 'loading');
+  }
+  // would this score make the board? Unknown board = optimistic: let her try.
+  function wouldPlace(score) {
+    if (!(score > 0)) return false;
+    if (!top || top.length < CF.top) return true;
+    return score > top[top.length - 1].score;
+  }
+  // ties: rank is 1 + however many scores are STRICTLY greater
+  function rankOf(name, score) {
+    if (!top) return 0;
+    let found = false;
+    for (const r of top) if (r.name === name && r.score === score) { found = true; break; }
+    if (!found) return 0;
+    let above = 0;
+    for (const r of top) if (r.score > score) above++;
+    return above + 1;
+  }
+  return {
+    available, fetchTop, submit, status, wouldPlace, rankOf, cleanName,
+    get top() { return top; },
+    get lastError() { return lastError; },
+    get collection() { return collection; },
+    set collection(v) { const s = String(v || '').replace(/[^A-Za-z0-9_]/g, ''); if (s) { collection = s; top = null; topAt = -1e9; } },
+  };
 })();
 
 // ===================================================================== TOUCH
@@ -463,10 +609,14 @@ function touchButtons() {
   if (!Touch.on || !G) return NO_BUTTONS;
   const R = CONFIG.TOUCH_BTN_R, pad = CONFIG.TOUCH_BTN_PAD;
   const y = Safe.top + pad + R;
-  let x = View.cssW - Safe.right - pad - R;
-  const out = [];
-  const add = (id) => { out.push({ id, x, y }); x -= CONFIG.TOUCH_BTN_GAP; };
+  // THE PLAYBILL is pinned to the top-right of the title poster, and on a 16:9 phone the buttons
+  // reach into it. On the title they take the top-LEFT corner instead: there is nothing up there
+  // but wall. In play they are back where the thumbs expect them, clear of the hearts.
   const play = G.state === 'PLAYING';
+  const left = G.state === 'TITLE';
+  let x = left ? Safe.left + pad + R : View.cssW - Safe.right - pad - R;
+  const out = [];
+  const add = (id) => { out.push({ id, x, y }); x += left ? CONFIG.TOUCH_BTN_GAP : -CONFIG.TOUCH_BTN_GAP; };
   if (play) add('pause');
   if (play || G.state === 'TITLE') add('mute');
   if ((play || G.state === 'TITLE') && fullscreenAvailable()) add('fullscreen');
@@ -549,6 +699,9 @@ const Input = (() => {
     const cx = e.clientX, cy = e.clientY;
     const btn = touchButtonAt(cx, cy);           // a button eats its own tap, in every state it is drawn
     if (btn) { pressTouchButton(btn); return; }
+    // a tap on an initials slot focuses the hidden <input> RIGHT HERE, inside the gesture, which is
+    // the only thing iOS accepts as a reason to raise its keyboard.
+    if (nameEntryTapFocus(cx, cy)) return;
     if (G && G.state === 'PLAYING') {
       if (nearTouchButton(cx, cy)) return;       // reaching for a button: no stick under the fingertip
       let half = cx < View.cssW / 2 ? 'move' : 'aim';
@@ -2393,7 +2546,8 @@ function newGame() {
     pendingShots: [], multPopT: 9, lastMult: 1, newBest: false,
     budget: 0, spent: 0, burstT: 0, telegraphs: [], waveCardT: 0, waveEndT: 0, winT: 0,
     bossWave: false, bossSpawned: false, bossDead: false, encore: false,
-    debugSpawn: false, dummies: false, spawnT: 1.0, quote: '', overT: 0, nextId: 1, beatT: 0,
+    debugSpawn: false, dummies: false, spawnT: 1.0, quote: '', overT: 0, overQY: 152, nextId: 1, beatT: 0,
+    entry: newEntry(),
     bankedKills: 0, bankedRun: false,
     picks: {}, cards: [], cardHover: -1, cardT: 0, newUnlocks: [], hard: false,
   };
@@ -2408,6 +2562,8 @@ function setState(name) {
   if (STATES[name].enter) STATES[name].enter(old);
 }
 function startRun() {
+  hideNameInput();   // a new run: no stray caret, no keyboard left standing over the arena
+  LB.fetchTop();     // warm the board while she plays, so the end card knows what it takes to place
   const keepDebug = G ? G.debugSpawn : false; const keepTS = G ? G.baseTimeScale : 1;
   G = newGame(); G.debugSpawn = keepDebug; G.baseTimeScale = keepTS; G.timeScale = keepTS;
   FX.reset(); Floor.build();
@@ -2668,8 +2824,242 @@ function hudData() {
   };
 }
 
+// ------------------------------------------------- THE PLAYBILL (the panel on the title poster)
+function playbillRect() { return { x: CONFIG.LB_PANEL_X, y: CONFIG.LB_PANEL_Y, w: CONFIG.LB_PANEL_W, h: CONFIG.LB_PANEL_H }; }
+// pinned over the poster art like a bill on a wall: dark paper, a cream hairline, the amber rule.
+function drawPlaybill(c) {
+  const r = playbillRect(), cx = r.x + r.w / 2;
+  rrect(c, r.x + 3, r.y + 4, r.w, r.h, 8, 'rgba(0,0,0,0.45)');
+  rrect(c, r.x, r.y, r.w, r.h, 8, 'rgba(7,7,13,0.82)', rgba(PAL.cream, 0.26), 1.5);
+  uiText(c, 'THE PLAYBILL', cx, r.y + 34, FSERIF(24), PAL.cream, 'center', { spacing: 4, shadow: 2 });
+  rule(c, cx - 62, r.y + 46, 124);
+  const st = LB.status(), rows = LB.top;
+  if (st !== 'ready') {
+    const say = st === 'off' ? 'OFFLINE' : st === 'error' ? 'OFFLINE' : st === 'empty' ? 'BE THE FIRST' : '…';
+    const a = st === 'loading' ? pulse(RT, 0.8, 0.35, 0.8) : 0.55;
+    uiText(c, say, cx, r.y + r.h / 2 + 16, FSANS(st === 'loading' ? 26 : 15), rgba(PAL.cream, a), 'center', { spacing: st === 'loading' ? 0 : 4 });
+    return;
+  }
+  const top = r.y + CONFIG.LB_ROW_TOP, step = CONFIG.LB_ROW_STEP;
+  for (let i = 0; i < rows.length && i < CONFIG.LEADERBOARD.top; i++) {
+    const e = rows[i], y = top + i * step;
+    if (i % 2 === 1) rrect(c, r.x + 10, y - 14, r.w - 20, 19, 4, 'rgba(244,240,230,0.045)');
+    const gold = i === 0;
+    uiText(c, String(i + 1), r.x + 38, y, FSANS(12), rgba(PAL.cream, gold ? 0.8 : 0.45), 'right', { spacing: 1 });
+    uiText(c, e.name, r.x + 50, y, FSANS(15), gold ? PAL.amber : PAL.cream, 'left', { spacing: 3 });
+    uiText(c, fmt(e.score), r.x + r.w - 58, y, FSANS(14), gold ? PAL.amber : rgba(PAL.cream, 0.9), 'right', { spacing: 0 });
+    uiText(c, 'W' + (e.wave || 0), r.x + r.w - 14, y, FSANS(11), rgba(PAL.cream, 0.5), 'right', { spacing: 1 });
+  }
+}
+
+// ------------------------------------------------- arcade initials entry (GAMEOVER and WIN)
+// Three slots, A-Z and 0-9. Desktop types; a phone taps a slot, which focuses a real <input> parked
+// exactly over the slots so iOS raises its keyboard, and mirrors what it gets back into the slots.
+const ENTRY_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+function newEntry() { return { active: false, done: false, sent: false, pending: false, chars: ['A', 'A', 'A'], slot: 0, msg: '', rank: 0 }; }
+function nameEntryActive() { return !!(G && G.entry && G.entry.active); }
+// the block's top edge: under the score/best on either card, clear of the retry line
+function entryBaseY() { return G && G.state === 'WIN' ? 402 : (G ? G.overQY : 152) + 192; }
+function entryLayout() {
+  const W = CONFIG.W, sw = CONFIG.LB_SLOT_W, sh = CONFIG.LB_SLOT_H, gap = CONFIG.LB_SLOT_GAP;
+  const y = entryBaseY(), x0 = W / 2 - (sw * 3 + gap * 2) / 2;
+  const slots = [];
+  for (let i = 0; i < 3; i++) slots.push({ x: x0 + i * (sw + gap), y, w: sw, h: sh });
+  const py = y + sh + 12, ph = CONFIG.LB_PILL_H, g = CONFIG.LB_PILL_GAP;
+  return {
+    y, slots,
+    submit: { x: W / 2 - g / 2 - 116, y: py, w: 116, h: ph },
+    skip: { x: W / 2 + g / 2, y: py, w: 96, h: ph },
+    hintY: py + ph + 20,
+  };
+}
+const inRect = (r, x, y) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+
+// the hidden <input>. Built on demand, never while the entry is down, and always parked over the
+// slots: a tap must land on the REAL element or iOS will not open a keyboard for it.
+let nameInput = null;
+function nameInputEl() {
+  if (nameInput) return nameInput;
+  const el = document.createElement('input');
+  el.type = 'text';
+  el.maxLength = 3;
+  el.setAttribute('maxlength', '3');
+  el.setAttribute('autocapitalize', 'characters');
+  el.setAttribute('autocomplete', 'off');
+  el.setAttribute('autocorrect', 'off');
+  el.setAttribute('spellcheck', 'false');
+  el.setAttribute('aria-label', 'your initials');
+  el.style.cssText = 'position:fixed;left:-9999px;top:0;width:10px;height:10px;display:none;z-index:2;' +
+    'opacity:0.01;color:transparent;background:transparent;caret-color:transparent;border:0;outline:none;' +
+    'padding:0;margin:0;font-size:16px;text-align:center;touch-action:manipulation;-webkit-user-select:text;user-select:text';
+  el.addEventListener('input', onNameInput);
+  el.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submitEntry(); }
+    else if (e.key === 'Escape') { e.preventDefault(); skipEntry(); }
+  });
+  document.body.appendChild(el);
+  nameInput = el;
+  return el;
+}
+function onNameInput() {
+  const e = G && G.entry;
+  if (!e || !e.active || !nameInput) return;
+  const v = LB.cleanName(nameInput.value);
+  if (nameInput.value !== v) nameInput.value = v;
+  for (let i = 0; i < 3; i++) e.chars[i] = v[i] || '';
+  e.slot = Math.min(2, v.length);
+}
+// parked over the three slots, in CSS px of the SCREEN, whenever a finger could reach for it
+function syncNameInput() {
+  const e = G && G.entry;
+  const want = !!(e && e.active && Touch.on);
+  if (!want) { if (nameInput) { nameInput.style.display = 'none'; nameInput.style.left = '-9999px'; } return; }
+  const el = nameInputEl(), L = entryLayout(), a = L.slots[0], b = L.slots[2];
+  el.style.display = 'block';
+  el.style.left = (View.offsetX + a.x * View.scale) + 'px';
+  el.style.top = (View.offsetY + a.y * View.scale) + 'px';
+  el.style.width = ((b.x + b.w - a.x) * View.scale) + 'px';
+  el.style.height = (a.h * View.scale) + 'px';
+}
+function hideNameInput() {
+  if (!nameInput) return;
+  try { nameInput.blur(); } catch (err) { /* nothing focused */ }
+  nameInput.style.display = 'none';
+  nameInput.style.left = '-9999px';
+}
+// called straight out of the pointerdown handler, so the focus IS the user gesture iOS wants
+function nameEntryTapFocus(cx, cy) {
+  const e = G && G.entry;
+  if (!e || !e.active || !Touch.on) return false;
+  const L = entryLayout(), a = L.slots[0], b = L.slots[2];
+  const x = View.offsetX + a.x * View.scale, y = View.offsetY + a.y * View.scale;
+  const w = (b.x + b.w - a.x) * View.scale, h = a.h * View.scale;
+  if (!(cx >= x && cx <= x + w && cy >= y && cy <= y + h)) return false;
+  syncNameInput();
+  const el = nameInputEl();
+  el.value = e.chars.join('');
+  try { el.focus(); } catch (err) { /* no keyboard: the slots still work by tap */ }
+  e.slot = clamp(Math.floor((cx - x) / Math.max(1, w / 3)), 0, 2);
+  Audio.click();
+  return true;
+}
+
+// she qualifies on a new personal best OR anything that would make the global ten. Never on 0,
+// never twice in one run, and never when there is no board to reach.
+function entryQualifies() {
+  if (!G || !G.entry || G.entry.done || G.entry.sent) return false;
+  if (!(G.score > 0) || !LB.available()) return false;
+  return !!G.newBest || LB.wouldPlace(G.score);
+}
+function beginNameEntry() {
+  const e = G.entry;
+  e.active = entryQualifies();
+  if (!e.active) return;
+  const init = LB.cleanName(Save.data.initials) || 'AAA';
+  e.chars = [init[0] || 'A', init[1] || 'A', init[2] || 'A'];
+  e.slot = 0; e.msg = ''; e.rank = 0; e.pending = false;
+  syncNameInput();
+  if (nameInput) nameInput.value = e.chars.join('');
+}
+function entryPut(ch) {
+  const e = G.entry;
+  e.chars[e.slot] = ch;
+  e.slot = Math.min(2, e.slot + 1);
+  if (nameInput) nameInput.value = e.chars.join('');
+  Audio.click();
+}
+function entryBack() {
+  const e = G.entry;
+  if (e.chars[e.slot] && e.slot === 2 && e.chars[2]) e.chars[2] = '';
+  else { e.slot = Math.max(0, e.slot - 1); e.chars[e.slot] = ''; }
+  if (nameInput) nameInput.value = e.chars.join('');
+  Audio.click();
+}
+function skipEntry() {
+  const e = G.entry;
+  if (!e.active) return;
+  e.active = false; e.done = true; e.msg = '';
+  hideNameInput();
+  Audio.click();
+}
+// exactly one CREATE per run. The card stops waiting the moment the POST is away.
+function submitEntry() {
+  const e = G.entry;
+  if (!e.active || e.sent) return;
+  const name = LB.cleanName(e.chars.join('')) || 'AAA';
+  const score = G.score, wave = G.wave;
+  e.sent = true; e.done = true; e.active = false; e.pending = true;
+  e.msg = 'SENDING TO THE PLAYBILL…';
+  Save.data.initials = name; Save.save();
+  hideNameInput();
+  Audio.click();
+  LB.submit(name, score, wave).then((okd) => {
+    if (!okd) { e.pending = false; e.msg = 'THE PLAYBILL COULD NOT BE REACHED'; return null; }
+    // re-read the board so the rank is the real one, ties and all
+    return LB.fetchTop(true).then(() => {
+      const rank = LB.rankOf(name, clamp(Math.round(score || 0), 0, 2000000) | 0);
+      e.pending = false; e.rank = rank;
+      e.msg = rank ? 'YOU PLACED #' + rank + ' ON THE PLAYBILL' : 'ADDED TO THE PLAYBILL';
+      return null;
+    });
+  }).catch(() => { e.pending = false; e.msg = 'ADDED TO THE PLAYBILL'; });
+}
+// mouse/finger + keyboard, run from GAMEOVER and WIN while the entry is up. Nothing else gets a look
+// in while this is on screen: Enter submits, it does not retry.
+function updateNameEntry() {
+  const e = G.entry;
+  syncNameInput();
+  const m = Input.mouse;
+  if (m.justDown) {
+    const L = entryLayout();
+    if (inRect(L.submit, m.x, m.y)) { submitEntry(); return; }
+    if (inRect(L.skip, m.x, m.y)) { skipEntry(); return; }
+    for (let i = 0; i < 3; i++) if (inRect(L.slots[i], m.x, m.y)) { e.slot = i; Audio.click(); return; }
+  }
+  // the hidden input has the caret: its own listeners mirror every keystroke into the slots
+  if (nameInput && document.activeElement === nameInput) return;
+  if (Input.pressed('Enter')) { submitEntry(); return; }
+  if (Input.pressed('Escape')) { skipEntry(); return; }
+  if (Input.pressed('Backspace')) { entryBack(); return; }
+  for (const ch of ENTRY_ALPHABET) {
+    if (Input.pressed(ch >= '0' && ch <= '9' ? 'Digit' + ch : 'Key' + ch)) { entryPut(ch); return; }
+  }
+}
+function drawEntryPill(c, r, label, hot) {
+  pill(c, r.x, r.y, r.w, r.h, 0.62);
+  rrect(c, r.x, r.y, r.w, r.h, Math.min(r.h / 2, 10), null, rgba(hot ? PAL.amber : PAL.cream, hot ? 0.75 : 0.3), 1.5);
+  uiText(c, label, r.x + r.w / 2, r.y + r.h / 2 + 5, FSANS(14), hot ? PAL.amber : rgba(PAL.cream, 0.8), 'center', { spacing: 3 });
+}
+function drawNameEntry(c) {
+  const e = G.entry, L = entryLayout(), W = CONFIG.W;
+  uiText(c, 'THE PLAYBILL  ·  ENTER YOUR INITIALS', W / 2, L.y - 16, FSANS(12), rgba(PAL.cream, 0.6), 'center', { spacing: 4 });
+  const m = Input.mouse;
+  for (let i = 0; i < 3; i++) {
+    const s = L.slots[i], on = i === e.slot;
+    rrect(c, s.x, s.y + 3, s.w, s.h, 6, 'rgba(0,0,0,0.45)');
+    rrect(c, s.x, s.y, s.w, s.h, 6, 'rgba(7,7,13,0.7)', rgba(on ? PAL.amber : PAL.cream, on ? 0.9 : 0.3), on ? 2.5 : 1.5);
+    const ch = e.chars[i] || '';
+    if (ch) uiText(c, ch, s.x + s.w / 2, s.y + s.h * 0.72, FSANS(34), on ? PAL.amber : PAL.cream, 'center', { shadow: 2 });
+    // the caret under the live slot: the one thing that says "this one is listening"
+    if (on) { c.fillStyle = rgba(PAL.amber, pulse(RT, 1.4, 0.25, 0.9)); c.fillRect(s.x + 10, s.y + s.h - 9, s.w - 20, 2); }
+  }
+  drawEntryPill(c, L.submit, 'SUBMIT', inRect(L.submit, m.x, m.y));
+  drawEntryPill(c, L.skip, 'SKIP', inRect(L.skip, m.x, m.y));
+  const hint = Touch.on ? 'TAP A SLOT TO TYPE  ·  SUBMIT OR SKIP' : 'TYPE  ·  BACKSPACE  ·  ENTER TO SUBMIT  ·  ESC TO SKIP';
+  uiText(c, hint, W / 2, L.hintY, FSANS(11), rgba(PAL.cream, 0.5), 'center', { spacing: 2 });
+}
+// the line that replaces the entry once the score is away (or was skipped)
+function drawEntryResult(c, y) {
+  const e = G.entry;
+  if (!e.msg) return;
+  const f = FSANS(15), w = uiMeasure(c, e.msg, f, 3);
+  pill(c, CONFIG.W / 2 - w / 2 - 22, y - 17, w + 44, 34, 0.5);
+  const col = e.pending ? rgba(PAL.cream, pulse(RT, 0.9, 0.4, 0.85)) : e.rank ? PAL.amber : rgba(PAL.cream, 0.8);
+  uiText(c, e.msg, CONFIG.W / 2, y, f, col, 'center', { spacing: 3 });
+}
+
 STATES.TITLE = {
-  enter() { Input.endTick(); },
+  enter() { Input.endTick(); hideNameInput(); LB.fetchTop(); },
   update() {
     // the HARD HABIT pill eats its own click, so the toggle never starts a run by accident
     if (hardUnlocked()) {
@@ -2693,16 +3083,20 @@ STATES.TITLE = {
     // menace at the gates
     c.save(); c.globalAlpha = 0.6;
     drawYorick(c, 470, 512, 2.2, 0); drawYorick(c, 512, 500, 2.2, 1); drawYorick(c, 545, 516, 2.2, 0);
-    c.save(); c.translate(880, 175); c.scale(-1, 1); drawRestless(c, 0, 0, 2.4, 0); c.restore();
-    c.save(); c.translate(815, 128); c.scale(-1, 1); drawRestless(c, 0, 0, 2.4, 1); c.restore();
-    drawRestless(c, 905, 300, 2.4, 0);
+    // the bill takes the top-right gate, so the pair that used to lurk there moved left of it
+    c.save(); c.translate(536, 152); c.scale(-1, 1); drawRestless(c, 0, 0, 2.4, 0); c.restore();
+    c.save(); c.translate(474, 104); c.scale(-1, 1); drawRestless(c, 0, 0, 2.4, 1); c.restore();
+    drawRestless(c, 906, 424, 2.4, 0);
     drawYorick(c, 60, 470, 2.2, 1); drawYorick(c, 96, 456, 2.2, 0);
     c.restore();
-    // hero
-    drawNunWithGun(c, 745, 476, 4.6, Math.PI - 0.55, 0.2);
+    // hero. Pulled down and in a touch (4.6 -> 4.05) so the playbill bill has the right shoulder of
+    // the poster to itself and her head still clears its bottom edge.
+    drawNunWithGun(c, 762, 502, 4.05, Math.PI - 0.55, 0.2);
+    // the global top ten, pinned over the right-hand gate
+    drawPlaybill(c);
     // poster text
     uiText(c, 'GET THEE TO', 72, 150, FSERIF(56), PAL.cream, 'left', { shadow: 3, spacing: 1 });
-    uiText(c, 'A NUNNERY', 68, 244, FSERIF(98), PAL.cream, 'left', { shadow: 4 });
+    uiText(c, 'A NUNNERY', 68, 244, FSERIF(86), PAL.cream, 'left', { shadow: 4 });   // 98 -> 86: the bill needs the right shoulder
     rule(c, 72, 262, 380);
     uiText(c, 'She took the advice.', 74, 302, FSERIF(28, true), PAL.amber, 'left', { shadow: 2 });
     const hint = Touch.on ? 'LEFT THUMB MOVE   ·   RIGHT THUMB DRAG TO AIM, RELEASE TO FIRE   ·   TAP TO BEGIN' : 'WASD MOVE   ·   MOUSE AIM   ·   CLICK TO BEGIN';
@@ -2812,6 +3206,7 @@ function drawGameOver(c, t, d) {
   const qf = FSERIF(30, true), ql = uiWrap(c, '“' + d.quote + '”', qf, 760);
   ql.forEach((ln, k) => uiText(c, ln, W / 2, 152 + k * 38, qf, PAL.cream, 'center', { shadow: 2 }));
   const qy = 152 + (ql.length - 1) * 38;
+  G.overQY = qy;   // update() hit-tests the initials entry against this too
   rule(c, W / 2 - 44, qy + 24, 88);
   uiText(c, 'SCORE', W / 2, qy + 66, FSANS(13), rgba(PAL.cream, 0.6), 'center', { spacing: 5 });
   uiText(c, fmt(d.score), W / 2, qy + 126, FSANS(58), PAL.cream, 'center', { shadow: 3 });
@@ -2827,7 +3222,12 @@ function drawGameOver(c, t, d) {
     uiText(c, 'NEW BEST', 0, 7, FSANS(16), PAL.ink, 'center', { spacing: 3 });
     c.restore();
   }
-  if (d.newUnlock) drawNewUnlocks(c, qy + 208);
+  // the initials entry slots in UNDER the score, and owns the card until it is submitted or skipped
+  if (G.entry.active) { drawNameEntry(c); return; }
+  if (G.entry.msg) {
+    drawEntryResult(c, qy + 200);
+    if (d.newUnlock) drawNewUnlocks(c, qy + 246);
+  } else if (d.newUnlock) drawNewUnlocks(c, qy + 208);
   uiText(c, Touch.on ? 'TAP TO RETRY' : 'CLICK TO RETRY', W / 2, 482, FSANS(13), rgba(PAL.cream, pulse(t, 0.7, 0.45, 1)), 'center', { spacing: 4 });
 }
 // WIN: confetti, the crown on the flagstones, and the line
@@ -2847,10 +3247,14 @@ function drawWin(c, t, d) {
   rrect(c, W / 2 - 370, 160, 740, 152, 8, 'rgba(7,7,13,0.55)');
   uiText(c, 'THE REST IS SILENCE.', W / 2, 226, FSERIF(56), PAL.cream, 'center', { shadow: 3, spacing: 1 });
   rule(c, W / 2 - 44, 244, 88);
-  uiText(c, Touch.on ? 'ENCORE?  TAP TO TAKE IT' : 'ENCORE?  CLICK   ·   ESC TO BOW', W / 2, 286, FSANS(14), rgba(PAL.cream, pulse(t, 0.7, 0.5, 1)), 'center', { spacing: 3 });
-  uiText(c, 'SCORE ' + fmt(d.score), W / 2, 372, FSANS(28), PAL.cream, 'center', { spacing: 2, shadow: 2 });
-  if (d.best != null) uiText(c, 'BEST ' + fmt(d.best), W / 2, 400, FSANS(14), rgba(PAL.cream, 0.7), 'center', { spacing: 3 });
-  if (d.newUnlock) drawNewUnlocks(c, 440);
+  // the encore line is a lie while the initials are being typed: Enter submits, it does not carry on
+  const ent = G.entry.active;
+  if (!ent) uiText(c, Touch.on ? 'ENCORE?  TAP TO TAKE IT' : 'ENCORE?  CLICK   ·   ESC TO BOW', W / 2, 286, FSANS(14), rgba(PAL.cream, pulse(t, 0.7, 0.5, 1)), 'center', { spacing: 3 });
+  uiText(c, 'SCORE ' + fmt(d.score), W / 2, ent ? 340 : 372, FSANS(28), PAL.cream, 'center', { spacing: 2, shadow: 2 });
+  if (d.best != null) uiText(c, 'BEST ' + fmt(d.best), W / 2, ent ? 366 : 400, FSANS(14), rgba(PAL.cream, 0.7), 'center', { spacing: 3 });
+  if (ent) { drawNameEntry(c); return; }
+  if (G.entry.msg) { drawEntryResult(c, 438); if (d.newUnlock) drawNewUnlocks(c, 484); }
+  else if (d.newUnlock) drawNewUnlocks(c, 440);
 }
 // iOS Safari has no Fullscreen API: the honest fix is Add to Home Screen. One small line, dismissible.
 function a2hsRect() { return { x: CONFIG.W - 24 - 382, y: 474, w: 382, h: 32 }; }
@@ -2894,10 +3298,15 @@ STATES.GAMEOVER = {
     bankRun(false);
     G.texts.length = 0;   // neither state ticks updateTexts: a callout caught mid-flight would hang forever
     G.quote = pick(QUOTES); G.overT = 0;
+    // the quote wrap decides where everything under it sits, and update() needs that before draw() runs
+    G.overQY = 152 + (uiWrap(ctx, '“' + G.quote + '”', FSERIF(30, true), 760).length - 1) * 38;
+    beginNameEntry();
     Audio.gameover();
   },
+  exit() { hideNameInput(); },
   update(dt) {
     G.overT += dt;
+    if (G.entry.active) { updateNameEntry(); return; }   // Enter submits; the retry flow waits its turn
     if (G.overT > CONFIG.RETRY_LOCK && Input.anyStart()) { startRun(); }
   },
   draw(c) {
@@ -2909,9 +3318,12 @@ STATES.GAMEOVER = {
 STATES.WIN = {
   enter() {
     Input.endTick(); G.overT = 0; G.texts.length = 0; bankRun(true);
+    beginNameEntry();
   },
+  exit() { hideNameInput(); },
   update(dt) {
     G.overT += dt;
+    if (G.entry.active) { updateNameEntry(); return; }   // no encore, no bow, until the slots are done
     if (Input.pressed('Escape')) { Save.save(); setState('TITLE'); return; } // bow: the score is already banked
     // Encore: carry the run on from wave 11 with every enemy type and a climbing multiplier
     if (G.overT > CONFIG.RETRY_LOCK && Input.anyStart()) {
@@ -2949,6 +3361,7 @@ STATES.PAUSED = {
 const Perf = { fps: 0, frameMs: 0, _frames: 0, _acc: 0 };
 const DEBUG = { on: /[?&]debug=1/.test(location.search) };
 function debugKeys() {
+  if (nameEntryActive()) return;   // she is typing her initials: M is a letter, not the mute key
   if (Input.pressed('Backquote')) DEBUG.on = !DEBUG.on;
   if (Input.pressed('KeyM')) Audio.toggleMute();
   if (!DEBUG.on || G.state !== 'PLAYING') return;
@@ -3026,6 +3439,22 @@ const GAME = {
   get firePill() { return Touch.on ? firePillRect() : null; },                                    // arena px
   get sticks() { return touchSnapshot(); },
   get rotatePrompt() { return rotateBlocked(); },
+  // ---- THE PLAYBILL. Plain values: the harness reads the whole board in one evaluate.
+  get leaderboard() { return { available: LB.available(), status: LB.status(), top: LB.top ? LB.top.map((r) => ({ name: r.name, score: r.score, wave: r.wave })) : null, lastError: LB.lastError }; },
+  get leaderboardCollection() { return LB.collection; }, set leaderboardCollection(v) { LB.collection = v; },
+  refreshLeaderboard(force) { LB.fetchTop(force !== false); return true; },
+  submitScore(name, score, wave) { return LB.submit(name, score, wave); },
+  get nameEntry() { const e = G.entry; return { active: e.active, done: e.done, sent: e.sent, pending: e.pending, name: e.chars.join(''), chars: e.chars.slice(), slot: e.slot, msg: e.msg, rank: e.rank }; },
+  get entryUI() { const L = entryLayout(); return { slots: L.slots, submit: L.submit, skip: L.skip }; },   // arena px
+  get initials() { return Save.data.initials; },
+  // debug only: land straight on a GAMEOVER card with a chosen score, entry and all
+  forceGameOver(score, wave) {
+    if (G.state !== 'PLAYING') startRun();
+    if (score != null) G.score = clamp(Math.round(+score || 0), 0, 2000000);
+    if (wave != null) G.wave = clamp(Math.round(+wave || 1), 1, 200);
+    setState('GAMEOVER');
+    return G.state;
+  },
   get debugSpawn() { return G.debugSpawn; }, set debugSpawn(v) { G.debugSpawn = !!v; },
   get dummies() { return G.dummies; }, set dummies(v) { G.dummies = !!v; },
   toScreen(x, y) { return { x: View.offsetX + x * View.scale, y: View.offsetY + y * View.scale }; },
@@ -3121,7 +3550,7 @@ function frame(now) {
   Music.set(G.state === 'PLAYING' ? 'play' : G.state === 'TITLE' || G.state === 'UPGRADE' ? 'drone' : 'off', G.wave || 1);
   Music.update();
   // portrait phone: the whole sim holds behind the ROTATE overlay, and picks up where it left off
-  if (rotateBlocked()) { clearTouch(); Input.endTick(); acc = 0; draw(); Perf.frameMs = Perf.frameMs * 0.9 + (performance.now() - t0) * 0.1; return; }
+  if (rotateBlocked()) { clearTouch(); hideNameInput(); Input.endTick(); acc = 0; draw(); Perf.frameMs = Perf.frameMs * 0.9 + (performance.now() - t0) * 0.1; return; }
   if (G.slowmoT > 0) { G.slowmoT -= dt; if (G.slowmoT <= 0) G.timeScale = G.baseTimeScale; }
   // wave-end and boss-death slow-mo run on render time, so 0.4 s means 0.4 s no matter how slow the sim is
   if (G.state === 'PLAYING') {
