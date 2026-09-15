@@ -1,3 +1,4 @@
 .superpowers/
 tools/shots/
 .DS_Store
+firebase-debug.log
