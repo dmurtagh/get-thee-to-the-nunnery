@@ -1,11 +1,16 @@
-// tools/lb-smoke.mjs — headless test for THE PLAYBILL (the Firestore REST leaderboard).
+// tools/lb-smoke.mjs — headless test for THE HOLY ORDER (the Firestore REST leaderboard).
 // Usage: node tools/lb-smoke.mjs [path/to/index.html] [--shots DIR] [--live]
 //
 // The board only exists over http(s), so this serves index.html from a throwaway localhost server
 // and installs a fetch MOCK (Page.addScriptToEvaluateOnNewDocument) that answers :runQuery with a
-// canned top ten and records every submit POST. Checks the title panel, the arcade initials entry
-// on both the keyboard and the touch path, the "no entry for a small score" rule, the skip path,
-// and that going offline is silent. --live skips the mock and talks to the real backend.
+// canned top ten, :runAggregationQuery with a canned count, and records every submit POST.
+//
+// It checks: the title panel, the twelve-character name field on the keyboard AND on the phone
+// (where the ONLY thing that mirrors is the `input` event — a virtual keyboard's keydown is 229),
+// the keyboard-aware layout, one POST per run with a name the server regex will accept, the exact
+// rank from the aggregation call, the board on the game-over card with the player's row picked out,
+// the TITLE pill, the "no entry for a small score" rule, the skip path, and that offline is silent.
+// --live skips the mock and talks to the real backend.
 import { launch, sleep } from './cdp.mjs';
 import { createServer } from 'node:http';
 import { readFileSync, mkdirSync } from 'node:fs';
@@ -16,6 +21,9 @@ const html = resolve(args.find((a) => !a.startsWith('--')) || 'index.html');
 const opt = (name, def) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : def; };
 const SHOTS = resolve(opt('--shots', 'tools/shots'));
 mkdirSync(SHOTS, { recursive: true });
+
+// the server rule, verbatim: the client must never send anything this would bounce
+const SERVER_RE = /^[A-Z0-9][A-Z0-9 ]{0,11}$/;
 
 const fails = [];
 const fail = (msg) => { fails.push(msg); console.log('  FAIL: ' + msg); };
@@ -30,19 +38,25 @@ const URL = `http://127.0.0.1:${srv.address().port}/index.html`;
 console.log('== serving ' + html + ' at ' + URL);
 
 // ---- the mock. Ten canned rows; every submit is recorded AND folded back into the query result,
-// so the rank the game reads back after a submit is the rank a real backend would have given it.
+// so the board the game reads back after a submit is the board a real backend would have given it.
+// The aggregation query always answers 36, so the exact rank must come out as #37.
 const CANNED = [
-  ['ROS', 98450, 11], ['GUI', 87310, 10], ['OPH', 76220, 10], ['HAM', 64100, 9], ['LAE', 51880, 8],
+  ['ROS', 98450, 11], ['GUILDENSTERN', 87310, 10], ['OPH', 76220, 10], ['HAM', 64100, 9], ['LAE', 51880, 8],
   ['POL', 42330, 7], ['HOR', 31200, 6], ['FOR', 18770, 5], ['MAR', 9410, 4], ['BER', 1000, 2],
 ];
+const AGG_COUNT = 36;
 const MOCK = `
-window.__lb = { posts: [], queries: 0, submits: [], urls: [] };
+window.__lb = { posts: [], queries: 0, aggs: [], submits: [], urls: [] };
 window.__realFetch = window.fetch;
 const CANNED = ${JSON.stringify(CANNED)};
 const reply = (o, status) => Promise.resolve(new Response(JSON.stringify(o), { status: status || 200, headers: { 'Content-Type': 'application/json' } }));
 window.fetch = function (u, o) {
   u = String(u);
   window.__lb.urls.push(u);
+  if (u.indexOf(':runAggregationQuery') >= 0) {
+    window.__lb.aggs.push({ url: u, body: JSON.parse(o.body) });
+    return reply([{ result: { aggregateFields: { c: { integerValue: '${AGG_COUNT}' } } }, readTime: '1970-01-01T00:00:00Z' }]);
+  }
   if (u.indexOf(':runQuery') >= 0) {
     window.__lb.queries++;
     const rows = CANNED.map((r) => ({ name: r[0], score: r[1], wave: r[2] })).concat(window.__lb.submits)
@@ -77,11 +91,17 @@ function bind(b) {
     while (Date.now() - t0 < timeoutMs) { if (await G(expr)) return true; await sleep(60); }
     fail(`timeout waiting for ${label} (${expr})`); return false;
   };
-  return { G, J, shot, checkErrors, waitFor };
+  // put a value into the hidden <input> exactly the way a virtual keyboard does: no keydown at all,
+  // just the element's value and one `input` event.
+  const typeInput = async (value) => {
+    await b.eval(`(() => { const el = document.activeElement; el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    await sleep(200);
+  };
+  return { G, J, shot, checkErrors, waitFor, typeInput };
 }
 
 // =====================================================================================
-// 1. DESKTOP: the title panel, the initials entry, the keyboard path, the rules
+// 1. DESKTOP: the title panel, the name field, the keyboard path, the board on the card
 // =====================================================================================
 const W = 1280, H = 720;
 const b = await launch({ width: W, height: H });
@@ -92,7 +112,7 @@ const b = await launch({ width: W, height: H });
   await sleep(900);
   checkErrors('load');
 
-  console.log('== the title shows THE PLAYBILL');
+  console.log('== the title shows THE HOLY ORDER');
   if (!(await G(`G.state === 'TITLE'`))) fail('not on the title');
   const lb = await J('G.leaderboard');
   if (lb.available) ok('GAME.leaderboard.available over http'); else fail('leaderboard unavailable over http: ' + JSON.stringify(lb));
@@ -100,91 +120,103 @@ const b = await launch({ width: W, height: H });
   else fail('GAME.leaderboard.top is not ten rows: ' + JSON.stringify(lb.top));
   if (lb.top && lb.top[0].name === 'ROS' && lb.top[0].score === 98450 && lb.top[0].wave === 11) ok('row 1 parsed: ROS 98,450 W11');
   else fail('row 1 parsed wrong: ' + JSON.stringify(lb.top && lb.top[0]));
+  if (lb.top && lb.top[1].name === 'GUILDENSTERN') ok('a twelve-character name survives the parser: GUILDENSTERN');
+  else fail('a long name did not survive parseRows: ' + JSON.stringify(lb.top && lb.top[1]));
   if (lb.lastError === null) ok('no lastError'); else fail('lastError set: ' + lb.lastError);
-  await shot('lb-title');
+  await shot('lb2-title');
+
+  console.log('== the name rules match the server regex ^[A-Z0-9][A-Z0-9 ]{0,11}$');
+  const cases = [
+    ['sister mary  9x!', 'SISTER MARY'],
+    ['   leading', 'LEADING'],
+    ['a', 'A'],
+    ['abcdefghijklmnop', 'ABCDEFGHIJKL'],
+    ['o\'hara-smith', 'OHARASMITH'],
+  ];
+  for (const [raw, want] of cases) {
+    const got = await b.eval(`window.GAME.cleanName(${JSON.stringify(raw)})`);
+    if (got !== want) { fail(`cleanName(${JSON.stringify(raw)}) = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); continue; }
+    if (!SERVER_RE.test(got)) { fail(`cleanName(${JSON.stringify(raw)}) = ${JSON.stringify(got)} fails the server regex`); continue; }
+    ok(`cleanName(${JSON.stringify(raw)}) -> ${JSON.stringify(got)} (server regex ok)`);
+  }
+  if ((await b.eval(`window.GAME.validName('')`)) === false) ok('the empty name is rejected'); else fail('validName("") was true');
 
   console.log('== the 60 s cache + in-flight dedupe');
   {
     const q0 = await b.eval('window.__lb.queries');
     await G(`G.startRun()`); await sleep(120);
     await b.eval(`GAME.forceGameOver(0, 1)`); await sleep(120);
-    await b.eval(`(() => { const G = window.GAME; return G.leaderboard.available; })()`);
-    // back to the title three times: the cache must answer, not the network
     for (let i = 0; i < 3; i++) { await G(`G.refreshLeaderboard(false)`); await sleep(80); }
     const q1 = await b.eval('window.__lb.queries');
     if (q1 === q0) ok(`the cache held: still ${q1} :runQuery call(s)`); else fail(`cache leaked ${q1 - q0} extra queries`);
   }
 
-  console.log('== a qualifying score raises the initials entry');
+  console.log('== a qualifying score raises the name entry');
   await b.eval(`GAME.forceGameOver(123456, 7)`);
   await sleep(400);
   const e0 = await J('G.nameEntry');
-  if (e0.active) ok('the entry is up: ' + JSON.stringify(e0.chars)); else fail('no entry UI for 123,456: ' + JSON.stringify(e0));
-  if (e0.name === 'AAA') ok('prefilled from save.initials: AAA'); else fail('bad prefill: ' + e0.name);
-  await shot('lb-entry');
+  if (e0.active) ok('the entry is up, prefilled: ' + JSON.stringify(e0.name)); else fail('no entry UI for 123,456: ' + JSON.stringify(e0));
+  if (e0.name === 'SISTER') ok('prefilled from save.playerName: SISTER'); else fail('bad prefill: ' + e0.name);
+  const ui = await J('G.entryUI');
+  if (ui.field && ui.field.w > 200 && !ui.slots) ok(`one wide field, not three slots: ${ui.field.w}x${ui.field.h}`);
+  else fail('the entry is not a single wide field: ' + JSON.stringify(ui));
+  await shot('lb2-entry');
 
-  console.log('== type A B C and press Enter');
-  await b.press('KeyA'); await sleep(70);
-  await b.press('KeyB'); await sleep(70);
-  await b.press('KeyC'); await sleep(70);
-  const typed = await J('G.nameEntry');
-  if (typed.name === 'ABC') ok('the slots read ABC'); else fail('typing gave ' + typed.name);
-  await b.press('Enter');
-  if (!(await waitFor('the submit to settle', `!G.nameEntry.pending && G.nameEntry.msg`, 6000))) { /* reported */ }
-  await sleep(250);
+  console.log('== desktop typing: letters, digits, a space, backspace, and the 12-char ceiling');
+  // one per frame: two keydowns of the SAME code inside one tick are one entry in the pressed Set
+  for (let i = 0; i < 8; i++) { await b.press('Backspace', 25); await sleep(45); }
+  if ((await G('G.nameEntry.name')) === '') ok('backspace emptied the field'); else fail('backspace left ' + (await G('G.nameEntry.name')));
+  await b.press('Space', 30);
+  if ((await G('G.nameEntry.name')) === '') ok('a leading space is refused'); else fail('a leading space got in');
+  for (const c of 'ABCDEFGHIJKLMN') await b.press(c >= '0' && c <= '9' ? 'Digit' + c : 'Key' + c, 25);
+  const capped = await G('G.nameEntry.name');
+  if (capped === 'ABCDEFGHIJKL') ok('typing past twelve is ignored: ' + capped); else fail('the 12-char ceiling leaked: ' + capped);
+  for (let i = 0; i < 6; i++) { await b.press('Backspace', 25); await sleep(45); }
+  await b.press('Space', 30);
+  await b.press('Digit9', 30);
+  const spaced = await G('G.nameEntry.name');
+  if (spaced === 'ABCDEF 9' && SERVER_RE.test(spaced)) ok('a single interior space and a digit: ' + spaced);
+  else fail('space/digit typing gave ' + JSON.stringify(spaced));
 
-  const posts = await b.eval('JSON.stringify(window.__lb.posts)').then(JSON.parse);
-  if (posts.length === 1) ok('exactly one POST'); else fail(`${posts.length} POST(s), expected 1`);
-  if (posts[0]) {
-    const f = posts[0].body.fields;
-    const want = { name: 'ABC', score: '123456', wave: '7', v: '1' };
-    const got = { name: f.name && f.name.stringValue, score: f.score && f.score.integerValue, wave: f.wave && f.wave.integerValue, v: f.v && f.v.integerValue };
-    if (JSON.stringify(got) === JSON.stringify(want)) ok('the document is exactly ' + JSON.stringify(got));
-    else fail('wrong fields: ' + JSON.stringify(got) + ' want ' + JSON.stringify(want));
-    if (Object.keys(f).length === 4) ok('four fields and no more'); else fail('extra fields: ' + Object.keys(f).join(','));
-    if (/\/documents\/scores\?key=/.test(posts[0].url)) ok('POSTed to /documents/scores?key=');
-    else fail('wrong submit URL: ' + posts[0].url);
-  }
-  const placed = await J('G.nameEntry');
-  if (/YOU PLACED #1\b/.test(placed.msg)) ok('the card says: ' + placed.msg); else fail('bad placement line: ' + JSON.stringify(placed));
-  if (placed.rank === 1) ok('rank 1 (1 + the count of scores strictly greater)'); else fail('rank ' + placed.rank);
-  if ((await G('G.initials')) === 'ABC') ok('save.initials remembered ABC'); else fail('initials not saved: ' + (await G('G.initials')));
-  await shot('lb-placed');
-  checkErrors('submit');
+  console.log('== ESC skips, sends nothing, and the board takes the card');
+  await b.press('Escape');
+  await sleep(900);   // the card holds still for LB_ENTRY_LOCK so the Esc that skipped is not a retry
+  const sk = await J('G.nameEntry');
+  if (!sk.active && sk.done && !sk.sent) ok('skipped: done, never sent'); else fail('bad skip state: ' + JSON.stringify(sk));
+  if ((await b.eval('window.__lb.posts.length')) === 0) ok('ESC sent nothing'); else fail('the skip posted something');
+  const card = await J('G.endCard');
+  if (card.board) ok('the board is on the game-over card straight after a skip'); else fail('no board after a skip');
+  if (card.highlight === -1) ok('nothing is highlighted (she never submitted)'); else fail('a row is lit after a skip: ' + card.highlight);
+  if (card.rect.y + card.rect.h <= 540 && card.rect.y > 100) ok(`the board fits the 960x540 card: y ${card.rect.y}..${card.rect.y + card.rect.h}`);
+  else fail('the board does not fit the card: ' + JSON.stringify(card.rect));
+  checkErrors('desktop entry');
 
-  console.log('== the retry flow is back');
-  await b.click(W / 2, H / 2);
-  await sleep(300);
-  if (await G(`G.state === 'PLAYING'`)) ok('a click retries once the entry is done'); else fail('still stuck: ' + (await G('G.state')));
+  console.log('== the TITLE pill, and Esc, go back to the board on the poster');
+  const tp = card.titlePill;
+  const sp = await J(`G.toScreen(${tp.x + tp.w / 2}, ${tp.y + tp.h / 2})`);
+  await b.click(sp.x, sp.y);
+  await sleep(350);
+  if (await G(`G.state === 'TITLE'`)) ok('the TITLE pill went back to the title'); else fail('the TITLE pill did nothing: ' + (await G('G.state')));
+  await b.eval(`GAME.forceGameOver(400, 2)`); await sleep(300);
+  await b.press('Escape'); await sleep(300);
+  if (await G(`G.state === 'TITLE'`)) ok('Esc on the game-over card goes to the title too'); else fail('Esc did not reach the title: ' + (await G('G.state')));
 
-  console.log('== a small score gets no entry (under the 10th AND under her own best)');
+  console.log('== a small score gets no entry, but still gets the board');
   await b.eval(`GAME.forceGameOver(500, 2)`);
-  await sleep(300);
+  await sleep(400);
   const small = await J('G.nameEntry');
   const board = await J('G.leaderboard.top');
   if (!small.active) ok(`no entry for 500 (10th is ${board[9].score}, best is 123,456)`); else fail('entry shown for a 500-point run');
-  const n1 = await b.eval('window.__lb.posts.length');
-  if (n1 === 1) ok('nothing else was sent'); else fail(`${n1} posts after the small run`);
+  if (await G('G.endCard.board')) ok('...and the board is drawn immediately'); else fail('no board when no entry was offered');
+  if ((await b.eval('window.__lb.posts.length')) === 0) ok('nothing has been sent all session'); else fail('something was posted');
 
-  console.log('== ESC skips, and sends nothing');
-  await b.click(W / 2, H / 2); await sleep(250);
-  await b.eval(`GAME.forceGameOver(200000, 9)`);
-  await sleep(300);
-  if (await G('G.nameEntry.active')) ok('a new personal best raises the entry again'); else fail('no entry for 200,000');
-  await b.press('Escape');
-  await sleep(300);
-  const sk = await J('G.nameEntry');
-  const n2 = await b.eval('window.__lb.posts.length');
-  if (!sk.active && sk.done && !sk.sent) ok('skipped: done, never sent'); else fail('bad skip state: ' + JSON.stringify(sk));
-  if (n2 === 1) ok('ESC sent nothing (still 1 POST total)'); else fail(`skip sent something: ${n2} posts`);
-  await b.press('Enter'); await sleep(300);
-  if (await G(`G.state === 'PLAYING'`)) ok('the retry flow works straight after a skip'); else fail('skip left the card stuck');
-  checkErrors('skip');
-
-  console.log('== a run worth nothing never asks for initials');
+  console.log('== a run worth nothing never asks for a name');
   await b.eval(`GAME.forceGameOver(0, 1)`);
   await sleep(250);
   if (!(await G('G.nameEntry.active'))) ok('no entry for a zero score'); else fail('entry shown for 0 points');
+  await b.click(W / 2, H - 60);
+  await sleep(300);
+  if (await G(`G.state === 'PLAYING'`)) ok('a click still retries'); else fail('retry broke: ' + (await G('G.state')));
   checkErrors('desktop');
 }
 
@@ -203,7 +235,9 @@ const b = await launch({ width: W, height: H });
   if (off.top === null) ok('top is null'); else fail('top is not null offline');
   const tried = await b.eval('window.__lb ? window.__lb.queries : -1');
   if (tried === 0) ok('zero network calls while offline'); else fail(`${tried} calls made while offline`);
-  await shot('lb-offline');
+  await b.eval(`GAME.forceGameOver(123456, 7)`); await sleep(300);
+  if (!(await G('G.nameEntry.active'))) ok('no entry to offer with no board to reach'); else fail('the entry came up offline');
+  await shot('lb2-offline');
   checkErrors('offline');
 
   console.log('== the host blocked outright (no mock): errors are swallowed');
@@ -230,12 +264,13 @@ const b = await launch({ width: W, height: H });
 await b.close();
 
 // =====================================================================================
-// 3. TOUCH: tap a slot -> the hidden <input> takes focus -> its value mirrors -> SUBMIT
+// 3. TOUCH: the phone path. Tap the field -> the hidden <input> takes focus -> `input` events
+//    mirror -> the keyboard-aware layout -> Enter ("done") submits -> the rank and the board.
 // =====================================================================================
 {
   const TW = 844, TH = 390;
   const t = await launch({ width: TW, height: TH, deviceScaleFactor: 3, mobile: true, touch: true });
-  const { G, J, shot, checkErrors, waitFor } = bind(t);
+  const { G, J, shot, checkErrors, waitFor, typeInput } = bind(t);
   const clip = { x: 0, y: 0, width: TW, height: TH };
   await t.send('Page.addScriptToEvaluateOnNewDocument', { source: MOCK });
   await t.goto(URL);
@@ -245,57 +280,164 @@ await b.close();
   const btns = await J('G.touchButtons.map((x) => ({ id: x.id, L: G.toLogical(x.x, x.y) }))');
   const panel = { x: 652, y: 34, w: 284, h: 282 };
   const clash = btns.filter((x) => x.L.x > panel.x - 34 && x.L.x < panel.x + panel.w + 34 && x.L.y > panel.y - 34 && x.L.y < panel.y + panel.h + 34);
-  if (!clash.length) ok('the title buttons clear the bill: ' + btns.map((x) => x.id + '@' + Math.round(x.L.x)).join(' '));
-  else fail('a button sits on the playbill: ' + JSON.stringify(clash));
+  if (!clash.length) ok('the title buttons clear the board: ' + btns.map((x) => x.id + '@' + Math.round(x.L.x)).join(' '));
+  else fail('a button sits on the board: ' + JSON.stringify(clash));
   if ((await J('G.leaderboard.top')).length === 10) ok('ten rows on the phone too'); else fail('phone board did not load');
-  await shot('lb-title-touch', clip);
+  await shot('lb2-title-touch', clip);
   checkErrors('phone load');
 
   console.log('== phone: a qualifying run raises the entry');
   await t.eval(`GAME.forceGameOver(123456, 7)`);
   await sleep(400);
   if (await G('G.nameEntry.active')) ok('the entry is up'); else fail('no entry on the phone');
-  await shot('lb-entry-touch', clip);
+  await shot('lb2-entry-touch', clip);
 
-  console.log('== tapping a slot focuses the hidden <input>');
+  console.log('== tapping the field focuses the hidden <input>');
   const ui = await J('G.entryUI');
-  const s1 = ui.slots[1];
-  const p = await J(`G.toScreen(${s1.x + s1.w / 2}, ${s1.y + s1.h / 2})`);
+  const f = ui.field;
+  const p = await J(`G.toScreen(${f.x + f.w / 2}, ${f.y + f.h / 2})`);
   await t.tap(p.x, p.y);
   await sleep(300);
   const act = await t.eval('document.activeElement ? document.activeElement.tagName : "none"');
   if (act === 'INPUT') ok('document.activeElement is the hidden INPUT (the keyboard would be up)');
   else fail('the tap did not focus an input, activeElement = ' + act);
-  const box = await t.eval(`JSON.stringify((() => { const el = document.activeElement, r = el.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), max: el.getAttribute('maxlength'), cap: el.getAttribute('autocapitalize'), auto: el.getAttribute('autocomplete') }; })())`).then(JSON.parse);
-  const want = await J(`G.toScreen(${ui.slots[0].x}, ${ui.slots[0].y})`);
+  const box = await t.eval(`JSON.stringify((() => { const el = document.activeElement, r = el.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), max: el.getAttribute('maxlength'), cap: el.getAttribute('autocapitalize'), auto: el.getAttribute('autocomplete'), corr: el.getAttribute('autocorrect'), spell: el.getAttribute('spellcheck'), hint: el.getAttribute('enterkeyhint') }; })())`).then(JSON.parse);
+  const want = await J(`G.toScreen(${f.x}, ${f.y})`);
   if (Math.abs(box.x - want.x) <= 2 && Math.abs(box.y - want.y) <= 2 && box.w > 40 && box.h > 20)
-    ok('it is parked over the slots: ' + JSON.stringify(box));
-  else fail('the input is not over the slots: ' + JSON.stringify(box) + ' want ' + JSON.stringify(want));
-  if (box.max === '3' && box.cap === 'characters' && box.auto === 'off') ok('maxlength=3, autocapitalize=characters, autocomplete=off');
+    ok('it is parked over the drawn field: ' + JSON.stringify({ x: box.x, y: box.y, w: box.w, h: box.h }));
+  else fail('the input is not over the field: ' + JSON.stringify(box) + ' want ' + JSON.stringify(want));
+  if (box.max === '12' && box.cap === 'characters' && box.auto === 'off' && box.corr === 'off' && box.spell === 'false' && box.hint === 'done')
+    ok('maxlength=12, autocapitalize=characters, autocomplete/autocorrect off, spellcheck false, enterkeyhint=done');
   else fail('bad input attributes: ' + JSON.stringify(box));
 
-  console.log('== its value mirrors into the slots');
-  await t.eval(`(() => { const el = document.activeElement; el.value = 'XYZ'; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
-  await sleep(250);
+  console.log('== an `input` event (and nothing else) drives the field');
+  await typeInput('sister mary  9x!');
   const mir = await J('G.nameEntry');
-  if (mir.name === 'XYZ') ok('the slots read XYZ'); else fail('mirroring failed: ' + JSON.stringify(mir.chars));
-  await shot('lb-entry-touch-typed', clip);
+  if (mir.name.length <= 12) ok(`the field is <= 12 chars: ${JSON.stringify(mir.name)} (${mir.name.length})`);
+  else fail('the field is ' + mir.name.length + ' chars: ' + JSON.stringify(mir.name));
+  if (mir.name === 'SISTER MARY ') ok('uppercased, filtered, the double space collapsed, truncated at 12');
+  else fail('mirroring gave ' + JSON.stringify(mir.name) + ', want "SISTER MARY "');
+  const elv = await t.eval('document.activeElement.value');
+  if (elv === mir.name) ok('the cleaned value was written back into the element: ' + JSON.stringify(elv));
+  else fail('element value ' + JSON.stringify(elv) + ' != field ' + JSON.stringify(mir.name));
+  const caret = await t.eval('document.activeElement.selectionStart');
+  if (caret === elv.length) ok('the caret stayed at the end (' + caret + ')'); else fail('the caret jumped to ' + caret);
+  const cleaned = await t.eval(`window.GAME.cleanName(window.GAME.nameEntry.name)`);
+  if (SERVER_RE.test(cleaned)) ok(`what will go on the wire is ${JSON.stringify(cleaned)} and the server regex accepts it`);
+  else fail(`${JSON.stringify(cleaned)} would be refused by ^[A-Z0-9][A-Z0-9 ]{0,11}$`);
+  await shot('lb2-entry-touch-typed', clip);
 
-  console.log('== tap SUBMIT');
-  const sb = await J(`G.toScreen(${ui.submit.x + ui.submit.w / 2}, ${ui.submit.y + ui.submit.h / 2})`);
-  await t.tap(sb.x, sb.y);
-  await waitFor('the submit to settle', `!G.nameEntry.pending && G.nameEntry.msg`, 6000);
+  console.log('== the keyboard-aware layout: the entry moves into what is left of the screen');
+  const kb = await J(`G.debugKeyboardRect(150)`);
+  if (kb.on && kb.layout) ok('a 150 px visible viewport (of ' + (await G('G.keyboard.layoutH')) + ') reads as keyboard-up');
+  else fail('a shrunken visual viewport did not register: ' + JSON.stringify(kb));
   await sleep(250);
-  const tposts = await t.eval('JSON.stringify(window.__lb.posts)').then(JSON.parse);
-  if (tposts.length === 1) ok('exactly one POST from the touch path'); else fail(`${tposts.length} POST(s) from a tap`);
-  if (tposts[0] && tposts[0].body.fields.name.stringValue === 'XYZ') ok('it carried XYZ');
-  else fail('the tap submitted ' + JSON.stringify(tposts[0] && tposts[0].body.fields.name));
-  const tmsg = await G('G.nameEntry.msg');
-  if (/PLAYBILL/.test(tmsg)) ok('the card says: ' + tmsg); else fail('no placement line: ' + tmsg);
-  const hidden = await t.eval(`(() => { const el = document.querySelector('input'); return el ? el.style.display : 'gone'; })()`);
-  if (hidden === 'none') ok('the hidden input is put away again'); else fail('the input is still live: ' + hidden);
-  await shot('lb-placed-touch', clip);
+  const L = await J('G.keyboard.layout');
+  if (L) {
+    const bottom = Math.max(L.field.y + L.field.h, L.submit.y + L.submit.h, L.skip.y + L.skip.h);
+    if (L.field.y >= 150 - 150 && bottom <= 150) ok(`the whole block sits inside the visible 150 px: title ${Math.round(L.titleY)}, field ${Math.round(L.field.y)}, pills to ${Math.round(bottom)}`);
+    else fail('the block runs past the visible area: ' + JSON.stringify(L));
+    if (Math.abs((L.field.x + L.field.w / 2) - TW / 2) <= 2) ok('centred horizontally');
+    else fail('not centred: field cx ' + (L.field.x + L.field.w / 2) + ' of ' + TW);
+    if (L.field.y - L.rect.y <= 40) ok(`stacked from the top of the visible area (${Math.round(L.field.y - L.rect.y)} px in)`);
+    else fail('the block is not stacked from the top: ' + JSON.stringify(L.field));
+    const ibox = await t.eval(`JSON.stringify((() => { const el = document.querySelector('input'), r = el.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width) }; })())`).then(JSON.parse);
+    if (Math.abs(ibox.x - L.field.x) <= 2 && Math.abs(ibox.y - L.field.y) <= 2)
+      ok('the hidden input followed the field into the visible area: ' + JSON.stringify(ibox));
+    else fail('the input did not follow: ' + JSON.stringify(ibox) + ' vs ' + JSON.stringify(L.field));
+  }
+  const ovf = await t.eval(`document.documentElement.style.overflow`);
+  if (ovf === 'hidden') ok("documentElement.style.overflow is pinned to 'hidden'"); else fail('overflow is ' + JSON.stringify(ovf));
+  await shot('lb2-keyboard', clip);
+  await t.eval(`GAME.debugKeyboardRect(0)`);
+  await sleep(200);
+  if (!(await G('G.keyboard.entryUp'))) ok('the block returns to the card when the keyboard closes');
+  else fail('the block is still in screen space with the keyboard down');
+  checkErrors('keyboard layout');
+
+  console.log('== Enter on the keyboard submits exactly one document');
+  await t.eval(`document.querySelector('input').focus()`);
+  await sleep(120);
+  await t.press('Enter');
+  if (!(await waitFor('the submit to settle', `!G.nameEntry.pending && G.nameEntry.msg`, 8000))) { /* reported */ }
+  await sleep(300);
+  const posts = await t.eval('JSON.stringify(window.__lb.posts)').then(JSON.parse);
+  if (posts.length === 1) ok('exactly one POST'); else fail(`${posts.length} POST(s), expected 1`);
+  if (posts[0]) {
+    const fl = posts[0].body.fields;
+    const got = { name: fl.name && fl.name.stringValue, score: fl.score && fl.score.integerValue, wave: fl.wave && fl.wave.integerValue, v: fl.v && fl.v.integerValue };
+    const wantDoc = { name: 'SISTER MARY', score: '123456', wave: '7', v: '1' };
+    if (JSON.stringify(got) === JSON.stringify(wantDoc)) ok('the document is exactly ' + JSON.stringify(got));
+    else fail('wrong fields: ' + JSON.stringify(got) + ' want ' + JSON.stringify(wantDoc));
+    if (SERVER_RE.test(got.name)) ok('the submitted name passes the server regex'); else fail('the submitted name would be refused: ' + got.name);
+    if (Object.keys(fl).length === 4) ok('four fields and no more'); else fail('extra fields: ' + Object.keys(fl).join(','));
+    if (/\/documents\/scores\?key=/.test(posts[0].url)) ok('POSTed to /documents/scores?key=');
+    else fail('wrong submit URL: ' + posts[0].url);
+  }
+  const hidden = await t.eval(`(() => { const el = document.querySelector('input'); return el ? el.style.display + '/' + String(document.activeElement === el) : 'gone'; })()`);
+  if (hidden === 'none/false') ok('the hidden input is blurred and put away'); else fail('the input is still live: ' + hidden);
+
+  console.log('== the exact rank comes from one :runAggregationQuery');
+  const aggs = await t.eval('JSON.stringify(window.__lb.aggs)').then(JSON.parse);
+  if (aggs.length === 1) ok('exactly one aggregation call'); else fail(`${aggs.length} aggregation call(s), expected 1`);
+  if (aggs[0]) {
+    if (/firestore\.googleapis\.com/.test(aggs[0].url) && /:runAggregationQuery\?key=/.test(aggs[0].url)) ok('...to the same host: ' + aggs[0].url.split('?')[0].split('/v1')[1]);
+    else fail('bad aggregation URL: ' + aggs[0].url);
+    const q = aggs[0].body.structuredAggregationQuery;
+    const ff = q && q.structuredQuery && q.structuredQuery.where && q.structuredQuery.where.fieldFilter;
+    if (ff && ff.op === 'GREATER_THAN' && ff.field.fieldPath === 'score' && ff.value.integerValue === '123456') ok('it counts scores GREATER_THAN 123456');
+    else fail('bad aggregation body: ' + JSON.stringify(aggs[0].body));
+    if (q && q.aggregations && q.aggregations[0].alias === 'c' && q.aggregations[0].count) ok('one count aggregation aliased c');
+    else fail('bad aggregations: ' + JSON.stringify(q && q.aggregations));
+  }
+  const placed = await J('G.nameEntry');
+  if (placed.msg === 'YOU PLACED #37 IN THE HOLY ORDER') ok('the card says: ' + placed.msg);
+  else fail(`bad rank line ${JSON.stringify(placed.msg)} (count ${AGG_COUNT} must give #${AGG_COUNT + 1})`);
+  if (placed.rank === AGG_COUNT + 1) ok('rank ' + placed.rank + ' = the server count + 1'); else fail('rank ' + placed.rank);
+  if ((await G('G.playerName')) === 'SISTER MARY') ok('save.playerName remembered SISTER MARY'); else fail('the name was not saved: ' + (await G('G.playerName')));
+
+  console.log('== the board is on the game-over card with her row lit');
+  const card = await J('G.endCard');
+  const top = await J('G.leaderboard.top');
+  if (card.board) ok('the board is drawn on the card'); else fail('no board after a submit');
+  if (card.highlight === 0 && top[0].name === 'SISTER MARY' && top[0].score === 123456)
+    ok('her row is row 1 and it is the highlighted one');
+  else fail(`highlight ${card.highlight}, row 1 is ${JSON.stringify(top[0])}`);
+  if (card.rankLine === placed.msg) ok('the rank line is drawn under the board');
+  else fail('rank line mismatch: ' + JSON.stringify(card.rankLine));
+  if (card.rect.y + card.rect.h <= 540) ok(`everything fits 960x540: board to y ${card.rect.y + card.rect.h}, rank/pills below`);
+  else fail('the board overflows the card: ' + JSON.stringify(card.rect));
+  await shot('lb2-gameover', clip);
   checkErrors('touch submit');
+
+  console.log('== the TITLE pill on the phone');
+  const tp2 = card.titlePill;
+  const sp2 = await J(`G.toScreen(${tp2.x + tp2.w / 2}, ${tp2.y + tp2.h / 2})`);
+  await t.tap(sp2.x, sp2.y);
+  await sleep(400);
+  if (await G(`G.state === 'TITLE'`)) ok('a tap on TITLE goes back to the poster board');
+  else fail('the TITLE pill did nothing on touch: ' + (await G('G.state')));
+
+  console.log('== SKIP still sends nothing, even with the input focused');
+  await t.eval(`GAME.forceGameOver(300000, 9)`);
+  await sleep(400);
+  if (await G('G.nameEntry.active')) ok('a new personal best raises the entry again'); else fail('no entry for 300,000');
+  const ui2 = await J('G.entryUI');
+  const fp = await J(`G.toScreen(${ui2.field.x + ui2.field.w / 2}, ${ui2.field.y + ui2.field.h / 2})`);
+  await t.tap(fp.x, fp.y); await sleep(250);
+  await typeInput('nope');
+  const kp = await J(`G.toScreen(${ui2.skip.x + ui2.skip.w / 2}, ${ui2.skip.y + ui2.skip.h / 2})`);
+  await t.tap(kp.x, kp.y);
+  await sleep(900);   // ...and the same beat before the card will listen for a retry again
+  const sk2 = await J('G.nameEntry');
+  if (!sk2.active && sk2.done && !sk2.sent) ok('SKIP skipped, even though the blur fires a change event');
+  else fail('SKIP did the wrong thing: ' + JSON.stringify(sk2));
+  if ((await t.eval('window.__lb.posts.length')) === 1) ok('still exactly one POST this session');
+  else fail('SKIP posted something: ' + (await t.eval('window.__lb.posts.length')));
+  await t.tap(TW / 2, TH - 40);
+  await sleep(400);
+  if (await G(`G.state === 'PLAYING'`)) ok('a tap retries straight after a skip'); else fail('the card is stuck: ' + (await G('G.state')));
+  checkErrors('touch');
   await t.close();
 }
 
@@ -316,18 +458,18 @@ if (args.includes('--live')) {
   else fail(`the live read failed: status ${live.status}, lastError ${live.lastError}`);
   checkErrors('live read');
 
-  console.log('== LIVE: write one row into scores_test');
+  console.log('== LIVE: write a twelve-character name into scores_test');
   await l.eval(`GAME.leaderboardCollection = 'scores_test'`);
-  const sent = await l.eval(`window.GAME.submitScore('TST', 1, 1)`);
-  if (sent === true) ok('GAME.submitScore resolved true (the CREATE was accepted)');
-  else fail('GAME.submitScore resolved ' + sent + ' — lastError ' + (await G('G.leaderboard.lastError')));
+  const sent = await l.eval(`window.GAME.submitScore('LIVE TEST', 2, 1)`);
+  if (sent === true) ok("GAME.submitScore('LIVE TEST', 2, 1) resolved true (the CREATE was accepted)");
+  else fail("GAME.submitScore('LIVE TEST', 2, 1) resolved " + sent + ' — lastError ' + (await G('G.leaderboard.lastError')));
   await l.eval(`GAME.refreshLeaderboard(true)`);
   await waitFor('the test board to come back', `G.leaderboard.top !== null`, 8000);
   console.log('  scores_test (through the game) = ' + JSON.stringify(await J('G.leaderboard.top')));
   checkErrors('live write');
   await l.close();
 
-  // ...and independently, straight from Node
+  // ...and independently, straight from Node: the row, and the aggregation endpoint the rank uses
   const BASE = 'https://firestore.googleapis.com/v1/projects/nunnery-leaderboard-232e/databases/(default)/documents';
   const KEY = 'AIzaSyAut-bwOoEea341fxUBXuyw19eTKYlpt1o';
   const r = await fetch(`${BASE}:runQuery?key=${KEY}`, {
@@ -338,9 +480,20 @@ if (args.includes('--live')) {
   const docs = (rows || []).filter((x) => x.document);
   if (r.ok && docs.length) ok(`read back ${docs.length} row(s) from scores_test over plain Node fetch (HTTP ${r.status})`);
   else fail(`could not read scores_test back: HTTP ${r.status}`);
-  const mine = docs.filter((d) => d.document.fields.name.stringValue === 'TST');
-  if (mine.length) ok(`the TST row is on the server: ${JSON.stringify(mine[mine.length - 1].document.fields)}`);
-  else fail('no TST row in scores_test');
+  const mine = docs.filter((d) => d.document.fields.name.stringValue === 'LIVE TEST');
+  if (mine.length) ok(`the LIVE TEST row is on the server: ${JSON.stringify(mine[mine.length - 1].document.fields)}`);
+  else fail('no LIVE TEST row in scores_test');
+
+  const a = await fetch(`${BASE}:runAggregationQuery?key=${KEY}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ structuredAggregationQuery: { structuredQuery: { from: [{ collectionId: 'scores_test' }], where: { fieldFilter: { field: { fieldPath: 'score' }, op: 'GREATER_THAN', value: { integerValue: '1' } } } }, aggregations: [{ alias: 'c', count: {} }] } }),
+  });
+  if (a.ok) {
+    const j = await a.json();
+    const cnt = j && j[0] && j[0].result && j[0].result.aggregateFields && j[0].result.aggregateFields.c;
+    if (cnt) ok(`the live :runAggregationQuery answers count = ${cnt.integerValue} (rank would be ${+cnt.integerValue + 1})`);
+    else fail('the live aggregation came back in an unexpected shape: ' + JSON.stringify(j).slice(0, 200));
+  } else fail(`the live aggregation query failed: HTTP ${a.status}`);
 }
 
 srv.close();

@@ -119,7 +119,7 @@ const CONFIG = {
   FIRE_PILL_W: 268, FIRE_PILL_H: 40, FIRE_PILL_Y: 344,   // the FIRE: FLICK / HOLD pill on the pause card
   ROTATE_CARD_W: 430, ROTATE_CARD_H: 390,   // the ROTATE card's own box, fitted to the screen
   HAPTICS: true, HAPTIC_FIRE: 12, HAPTIC_FLICK: 20, HAPTIC_HURT: 35,
-  // ---- THE PLAYBILL (global leaderboard). Cloud Firestore over its plain REST API, no SDK.
+  // ---- THE HOLY ORDER (global leaderboard). Cloud Firestore over its plain REST API, no SDK.
   // projectId/apiKey are public by design: the security rules are what guard the collection (anyone
   // may read, and CREATE one document of exactly {name, score, wave, v}; nothing may be changed).
   LEADERBOARD: {
@@ -130,12 +130,20 @@ const CONFIG = {
     timeoutMs: 6000,
     version: 1,
     top: 10,
+    nameMax: 12,             // the server rule is ^[A-Z0-9][A-Z0-9 ]{0,11}$ - the client enforces the same
     cacheMs: 60000,          // the top ten is re-read at most once a minute
     retryMs: 8000,           // ...but a FAILED read is allowed to be retried much sooner
   },
-  // the panel on the title poster, and the arcade initials entry on the end cards
-  LB_PANEL_X: 652, LB_PANEL_Y: 34, LB_PANEL_W: 284, LB_PANEL_H: 282, LB_ROW_STEP: 21, LB_ROW_TOP: 76,
-  LB_SLOT_W: 50, LB_SLOT_H: 56, LB_SLOT_GAP: 14, LB_PILL_H: 32, LB_PILL_GAP: 16,
+  // the board panel (the title poster AND the end cards) and the name entry under it
+  LB_PANEL_X: 652, LB_PANEL_Y: 34, LB_PANEL_W: 284, LB_PANEL_H: 282,
+  LB_FIELD_W: 320, LB_FIELD_H: 44, LB_PILL_H: 32, LB_PILL_GAP: 16,
+  LB_END_W: 360, LB_END_BOTTOM: 428,   // the end-card board: centred, its bottom edge pinned
+  LB_RANK_Y: 452, LB_UNLOCK_Y: 488, LB_RETRY_Y: 522,
+  LB_ENTRY_LOCK: 0.6,   // the Enter that submits must never be the Enter that starts the next run
+  LB_TITLE_PILL: { x: 828, y: 478, w: 92, h: 28 },   // the TITLE pill on GAMEOVER/WIN (960 - 40 - 92)
+  // the on-screen keyboard: a visible viewport shorter than this fraction of the layout viewport
+  // means the keyboard is up, and the whole entry block moves into what is left of the screen.
+  KB_SHRINK: 0.75, KB_MARGIN: 12, KB_FIELD_W: 320, KB_FIELD_H: 36, KB_PILL_H: 28,
 };
 
 const PAL = {
@@ -305,12 +313,18 @@ document.addEventListener('fullscreenchange', () => setTimeout(resize, 50));
 // persistence: localStorage with an in-memory fallback, never throws
 const Save = (() => {
   const KEY = 'nunnery.v1';
-  const def = () => ({ hi: 0, bestWave: 0, kills: 0, runs: 0, wins: 0, unlocks: [], mute: false, touchFire: CONFIG.TOUCH_FIRE_MODE, hints: {}, initials: 'AAA' });
+  const def = () => ({ hi: 0, bestWave: 0, kills: 0, runs: 0, wins: 0, unlocks: [], mute: false, touchFire: CONFIG.TOUCH_FIRE_MODE, hints: {}, playerName: 'SISTER' });
   let data = def();
   function load() {
     try {
       const raw = localStorage.getItem(KEY);
-      if (raw) { const o = JSON.parse(raw); const d = def(); for (const k in d) if (o && typeof o[k] === typeof d[k] && Array.isArray(o[k]) === Array.isArray(d[k])) d[k] = o[k]; data = d; }
+      if (raw) {
+        const o = JSON.parse(raw); const d = def();
+        for (const k in d) if (o && typeof o[k] === typeof d[k] && Array.isArray(o[k]) === Array.isArray(d[k])) d[k] = o[k];
+        // a save from before names got long carries three arcade initials: they become the name
+        if (o && typeof o.playerName !== 'string' && typeof o.initials === 'string' && o.initials) d.playerName = o.initials;
+        data = d;
+      }
     } catch (e) { data = def(); }
     return data;
   }
@@ -319,9 +333,11 @@ const Save = (() => {
 })();
 
 // ===================================================================== LEADERBOARD
-// THE PLAYBILL: the global top ten, on Cloud Firestore's plain REST API. No SDK, no bundler, still
-// one file. Two calls only: a :runQuery for the top ten (single-field ordering needs no index) and
-// a POST that CREATES one score document. The rules on the server are the real validation.
+// THE HOLY ORDER: the global top ten, on Cloud Firestore's plain REST API. No SDK, no bundler,
+// still one file. Three calls only: a :runQuery for the top ten (single-field ordering needs no
+// index), a POST that CREATES one score document, and a :runAggregationQuery that counts the scores
+// above yours so the card can name an exact rank even when it is far past tenth. The rules on the
+// server are the real validation.
 //
 // Three rules hold this whole section together:
 //   1. gameplay NEVER waits on the network - every call is fire-and-forget and the frame loop
@@ -342,7 +358,7 @@ const LB = (() => {
   function warn(e) {
     lastError = String((e && e.message) || e || 'error');
     // once. A leaderboard is a nicety; it never gets to shout, and never as an error.
-    if (!warned) { warned = true; try { console.warn('the playbill is unreachable: ' + lastError); } catch (e2) { /* no console */ } }
+    if (!warned) { warned = true; try { console.warn('the holy order is unreachable: ' + lastError); } catch (e2) { /* no console */ } }
   }
   function onLine() { try { return navigator.onLine !== false; } catch (e) { return true; } }
   function httpish() { try { return location.protocol === 'http:' || location.protocol === 'https:'; } catch (e) { return false; } }
@@ -377,7 +393,7 @@ const LB = (() => {
     for (const r of rows) {
       const f = r && r.document && r.document.fields;
       if (!f) continue;
-      const name = f.name && typeof f.name.stringValue === 'string' ? f.name.stringValue.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 3) : '';
+      const name = f.name && typeof f.name.stringValue === 'string' ? cleanName(f.name.stringValue) : '';
       const score = f.score ? parseInt(f.score.integerValue, 10) : NaN;
       const wave = f.wave ? parseInt(f.wave.integerValue, 10) : NaN;
       if (!name || !isFinite(score)) continue;
@@ -402,14 +418,26 @@ const LB = (() => {
     );
     return inflight;
   }
-  // A-Z 0-9, three characters, exactly what the server rules will accept
-  function cleanName(s) { return String(s == null ? '' : s).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 3); }
+  // ---- names. 1-12 characters, A-Z 0-9 and SINGLE spaces, no leading space: exactly the server
+  // rule ^[A-Z0-9][A-Z0-9 ]{0,11}$. cleanTyping() is what the field shows while she is still typing
+  // (a trailing space has to survive, or she could never type a second word); cleanName() is what
+  // actually goes on the wire, trimmed at both ends.
+  function cleanTyping(s) {
+    return String(s == null ? '' : s).toUpperCase()
+      .replace(/[^A-Z0-9 ]/g, '')
+      .replace(/ {2,}/g, ' ')
+      .replace(/^ +/, '')
+      .slice(0, CF.nameMax);
+  }
+  function cleanName(s) { return cleanTyping(s).replace(/ +$/, ''); }
+  const NAME_RE = /^[A-Z0-9][A-Z0-9 ]{0,11}$/;
+  function validName(s) { return NAME_RE.test(String(s == null ? '' : s)); }
   // one CREATE. Resolves true/false; the caller decides what to say about it.
   function submit(name, score, wave) {
     const n = cleanName(name);
     const s = clamp(Math.round(+score || 0), 0, 2000000) | 0;
     const w = clamp(Math.round(+wave || 1), 1, 200) | 0;
-    if (!available() || !n) return Promise.resolve(false);
+    if (!available() || !n || !validName(n)) return Promise.resolve(false);
     const body = { fields: { name: { stringValue: n }, score: { integerValue: String(s) }, wave: { integerValue: String(w) }, v: { integerValue: String(CF.version | 0) } } };
     return post(base() + '/' + collection + '?' + key(), body).then(
       () => { top = null; topAt = -1e9; lastError = null; return true; },   // the board just moved: drop the cache
@@ -428,6 +456,30 @@ const LB = (() => {
     if (!top || top.length < CF.top) return true;
     return score > top[top.length - 1].score;
   }
+  // the EXACT rank, straight off the server: count every score strictly greater than this one and
+  // add one. One aggregation call, same host, and it ALWAYS resolves (0 = ask the top ten instead).
+  function rankExact(score) {
+    const s = clamp(Math.round(+score || 0), 0, 2000000) | 0;
+    if (!available()) return Promise.resolve(0);
+    const body = {
+      structuredAggregationQuery: {
+        structuredQuery: {
+          from: [{ collectionId: collection }],
+          where: { fieldFilter: { field: { fieldPath: 'score' }, op: 'GREATER_THAN', value: { integerValue: String(s) } } },
+        },
+        aggregations: [{ alias: 'c', count: {} }],
+      },
+    };
+    return post(base() + ':runAggregationQuery?' + key(), body).then(
+      (res) => {
+        const r = Array.isArray(res) ? res[0] : res;
+        const f = r && r.result && r.result.aggregateFields && r.result.aggregateFields.c;
+        const n = f ? parseInt(f.integerValue, 10) : NaN;
+        return isFinite(n) && n >= 0 ? n + 1 : 0;
+      },
+      (e) => { warn(e); return 0; },
+    );
+  }
   // ties: rank is 1 + however many scores are STRICTLY greater
   function rankOf(name, score) {
     if (!top) return 0;
@@ -439,7 +491,8 @@ const LB = (() => {
     return above + 1;
   }
   return {
-    available, fetchTop, submit, status, wouldPlace, rankOf, cleanName,
+    available, fetchTop, submit, status, wouldPlace, rankOf, rankExact, cleanName, cleanTyping, validName,
+    get nameMax() { return CF.nameMax; },
     get top() { return top; },
     get lastError() { return lastError; },
     get collection() { return collection; },
@@ -609,7 +662,7 @@ function touchButtons() {
   if (!Touch.on || !G) return NO_BUTTONS;
   const R = CONFIG.TOUCH_BTN_R, pad = CONFIG.TOUCH_BTN_PAD;
   const y = Safe.top + pad + R;
-  // THE PLAYBILL is pinned to the top-right of the title poster, and on a 16:9 phone the buttons
+  // THE HOLY ORDER is pinned to the top-right of the title poster, and on a 16:9 phone the buttons
   // reach into it. On the title they take the top-LEFT corner instead: there is nothing up there
   // but wall. In play they are back where the thumbs expect them, clear of the hearts.
   const play = G.state === 'PLAYING';
@@ -699,8 +752,9 @@ const Input = (() => {
     const cx = e.clientX, cy = e.clientY;
     const btn = touchButtonAt(cx, cy);           // a button eats its own tap, in every state it is drawn
     if (btn) { pressTouchButton(btn); return; }
-    // a tap on an initials slot focuses the hidden <input> RIGHT HERE, inside the gesture, which is
+    // a tap on the name field focuses the hidden <input> RIGHT HERE, inside the gesture, which is
     // the only thing iOS accepts as a reason to raise its keyboard.
+    nameEntryPointerDown(cx, cy);
     if (nameEntryTapFocus(cx, cy)) return;
     if (G && G.state === 'PLAYING') {
       if (nearTouchButton(cx, cy)) return;       // reaching for a button: no stick under the fingertip
@@ -2824,122 +2878,233 @@ function hudData() {
   };
 }
 
-// ------------------------------------------------- THE PLAYBILL (the panel on the title poster)
-function playbillRect() { return { x: CONFIG.LB_PANEL_X, y: CONFIG.LB_PANEL_Y, w: CONFIG.LB_PANEL_W, h: CONFIG.LB_PANEL_H }; }
-// pinned over the poster art like a bill on a wall: dark paper, a cream hairline, the amber rule.
-function drawPlaybill(c) {
-  const r = playbillRect(), cx = r.x + r.w / 2;
+// ------------------------------------------------- THE HOLY ORDER (the board panel)
+// One component, drawn twice: pinned to the title poster like a bill on a wall, and again on the
+// end cards with the row you just earned picked out in amber. Dark paper, a cream hairline, the
+// amber rule, a Georgia head and a small sans LEADERBOARD under it.
+function boardRect() { return { x: CONFIG.LB_PANEL_X, y: CONFIG.LB_PANEL_Y, w: CONFIG.LB_PANEL_W, h: CONFIG.LB_PANEL_H }; }
+// the end-card board: centred, its bottom edge pinned, so the rank line and the pills never move
+function endBoardRect() {
+  const w = CONFIG.LB_END_W, y = endBoardTop();
+  return { x: CONFIG.W / 2 - w / 2, y, w, h: Math.max(120, CONFIG.LB_END_BOTTOM - y) };
+}
+function endBoardTop() { return G && G.state === 'WIN' ? 156 : (G ? G.overQY : 84) + 96; }
+// the highlighted row: the one this run just put on the board (never on the title)
+function boardHighlightIndex() {
+  const e = G && G.entry, rows = LB.top;
+  if (!e || !e.sent || !e.sentName || !rows) return -1;
+  for (let i = 0; i < rows.length; i++) if (rows[i].name === e.sentName && rows[i].score === e.sentScore) return i;
+  return -1;
+}
+function drawBoard(c, r, hi) {
+  const cx = r.x + r.w / 2, k = clamp(r.w / 284, 0.75, 1.2);
+  const px = (n) => Math.max(8, Math.round(n * k));
   rrect(c, r.x + 3, r.y + 4, r.w, r.h, 8, 'rgba(0,0,0,0.45)');
   rrect(c, r.x, r.y, r.w, r.h, 8, 'rgba(7,7,13,0.82)', rgba(PAL.cream, 0.26), 1.5);
-  uiText(c, 'THE PLAYBILL', cx, r.y + 34, FSERIF(24), PAL.cream, 'center', { spacing: 4, shadow: 2 });
-  rule(c, cx - 62, r.y + 46, 124);
+  uiText(c, 'THE HOLY ORDER', cx, r.y + 34 * k, FSERIF(px(23)), PAL.cream, 'center', { spacing: 3, shadow: 2 });
+  rule(c, cx - 66 * k, r.y + 44 * k, 132 * k);
+  uiText(c, 'LEADERBOARD', cx, r.y + 60 * k, FSANS(px(9)), rgba(PAL.cream, 0.5), 'center', { spacing: 3 });
   const st = LB.status(), rows = LB.top;
   if (st !== 'ready') {
-    const say = st === 'off' ? 'OFFLINE' : st === 'error' ? 'OFFLINE' : st === 'empty' ? 'BE THE FIRST' : '…';
+    const say = st === 'off' || st === 'error' ? 'OFFLINE' : st === 'empty' ? 'BE THE FIRST OF THE ORDER' : '…';
     const a = st === 'loading' ? pulse(RT, 0.8, 0.35, 0.8) : 0.55;
-    uiText(c, say, cx, r.y + r.h / 2 + 16, FSANS(st === 'loading' ? 26 : 15), rgba(PAL.cream, a), 'center', { spacing: st === 'loading' ? 0 : 4 });
+    uiText(c, say, cx, r.y + r.h / 2 + 16, FSANS(st === 'loading' ? px(26) : px(13)), rgba(PAL.cream, a), 'center', { spacing: st === 'loading' ? 0 : 3 });
     return;
   }
-  const top = r.y + CONFIG.LB_ROW_TOP, step = CONFIG.LB_ROW_STEP;
-  for (let i = 0; i < rows.length && i < CONFIG.LEADERBOARD.top; i++) {
-    const e = rows[i], y = top + i * step;
-    if (i % 2 === 1) rrect(c, r.x + 10, y - 14, r.w - 20, 19, 4, 'rgba(244,240,230,0.045)');
-    const gold = i === 0;
-    uiText(c, String(i + 1), r.x + 38, y, FSANS(12), rgba(PAL.cream, gold ? 0.8 : 0.45), 'right', { spacing: 1 });
-    uiText(c, e.name, r.x + 50, y, FSANS(15), gold ? PAL.amber : PAL.cream, 'left', { spacing: 3 });
-    uiText(c, fmt(e.score), r.x + r.w - 58, y, FSANS(14), gold ? PAL.amber : rgba(PAL.cream, 0.9), 'right', { spacing: 0 });
-    uiText(c, 'W' + (e.wave || 0), r.x + r.w - 14, y, FSANS(11), rgba(PAL.cream, 0.5), 'right', { spacing: 1 });
+  const n = Math.min(rows.length, CONFIG.LEADERBOARD.top);
+  const top = r.y + 80 * k, avail = r.y + r.h - 10 - top;
+  const step = Math.max(13, Math.min(21 * k, avail / Math.max(1, n)));
+  for (let i = 0; i < n; i++) {
+    const e = rows[i], y = top + i * step + step * 0.7;
+    const on = i === hi;
+    if (on) rrect(c, r.x + 8, y - step * 0.68, r.w - 16, step, 4, rgba(PAL.amber, 0.16), rgba(PAL.amber, 0.55), 1.2);
+    else if (i % 2 === 1) rrect(c, r.x + 10, y - step * 0.68, r.w - 20, step - 2, 4, 'rgba(244,240,230,0.045)');
+    const lit = on || i === 0;
+    // 12 characters have to fit between the rank and the score: the name shrinks, it never spills
+    const nf = FSANS(px(e.name.length > 9 ? 11 : e.name.length > 6 ? 13 : 15));
+    uiText(c, String(i + 1), r.x + 34 * k, y, FSANS(px(11)), rgba(PAL.cream, lit ? 0.8 : 0.45), 'right', { spacing: 1 });
+    uiText(c, e.name, r.x + 42 * k, y, nf, lit ? PAL.amber : PAL.cream, 'left', { spacing: 1.5 });
+    uiText(c, fmt(e.score), r.x + r.w - 52 * k, y, FSANS(px(13)), lit ? PAL.amber : rgba(PAL.cream, 0.9), 'right', { spacing: 0 });
+    uiText(c, 'W' + (e.wave || 0), r.x + r.w - 12 * k, y, FSANS(px(10)), rgba(PAL.cream, 0.5), 'right', { spacing: 1 });
   }
 }
 
-// ------------------------------------------------- arcade initials entry (GAMEOVER and WIN)
-// Three slots, A-Z and 0-9. Desktop types; a phone taps a slot, which focuses a real <input> parked
-// exactly over the slots so iOS raises its keyboard, and mirrors what it gets back into the slots.
-const ENTRY_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-function newEntry() { return { active: false, done: false, sent: false, pending: false, chars: ['A', 'A', 'A'], slot: 0, msg: '', rank: 0 }; }
-function nameEntryActive() { return !!(G && G.entry && G.entry.active); }
-// the block's top edge: under the score/best on either card, clear of the retry line
-function entryBaseY() { return G && G.state === 'WIN' ? 402 : (G ? G.overQY : 152) + 192; }
-function entryLayout() {
-  const W = CONFIG.W, sw = CONFIG.LB_SLOT_W, sh = CONFIG.LB_SLOT_H, gap = CONFIG.LB_SLOT_GAP;
-  const y = entryBaseY(), x0 = W / 2 - (sw * 3 + gap * 2) / 2;
-  const slots = [];
-  for (let i = 0; i < 3; i++) slots.push({ x: x0 + i * (sw + gap), y, w: sw, h: sh });
-  const py = y + sh + 12, ph = CONFIG.LB_PILL_H, g = CONFIG.LB_PILL_GAP;
+// ------------------------------------------------- the on-screen keyboard
+// A virtual keyboard does not resize the window: it shrinks the VISUAL viewport and leaves the
+// layout viewport where it was. window.visualViewport is the only thing that sees it, so that is
+// what we watch. While it is up the whole entry block is redrawn in SCREEN space inside whatever
+// is left of the glass - everything else would be under the keys.
+const KB = { on: false, x: 0, y: 0, w: 0, h: 0, forced: 0 };
+function kbLayoutH() { try { return Math.max(1, window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 1); } catch (e) { return 1; } }
+function kbRead() {
+  const vv = window.visualViewport;
+  if (KB.forced > 0) {   // the harness: a fake visible rect, since CDP cannot shrink a real one
+    KB.x = 0; KB.y = 0; KB.w = View.cssW; KB.h = KB.forced;
+    KB.on = KB.forced < kbLayoutH() * CONFIG.KB_SHRINK;
+    return;
+  }
+  if (!vv) { KB.on = false; return; }
+  KB.x = vv.offsetLeft || 0; KB.y = vv.offsetTop || 0;
+  KB.w = vv.width || View.cssW; KB.h = vv.height || View.cssH;
+  KB.on = KB.h < kbLayoutH() * CONFIG.KB_SHRINK;
+}
+// iOS scrolls the PAGE to bring a focused input into view, which slides the canvas out from under
+// the finger. Pin it: nothing on this page ever scrolls.
+function kbPin() {
+  try { document.documentElement.style.overflow = 'hidden'; } catch (e) { /* no document */ }
+  try { window.scrollTo(0, 0); } catch (e) { /* nothing to scroll */ }
+}
+(function watchViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const onChange = () => { kbRead(); kbPin(); syncNameInput(); };
+  try { vv.addEventListener('resize', onChange); vv.addEventListener('scroll', onChange); } catch (e) { /* older engine: the normal layout stands */ }
+})();
+// the entry block moves to screen space only while a keyboard is actually covering the card
+function kbEntryUp() { return !!(KB.on && nameEntryActive()); }
+// every rect here is CSS px of the SCREEN (== the canvas, which is the layout viewport in touch mode)
+function kbLayout() {
+  if (!kbEntryUp()) return null;
+  const m = CONFIG.KB_MARGIN, cx = KB.x + KB.w / 2;
+  const fw = Math.min(CONFIG.KB_FIELD_W, KB.w - 40), fh = CONFIG.KB_FIELD_H, ph = CONFIG.KB_PILL_H;
+  const y0 = KB.y + m;
+  const field = { x: cx - fw / 2, y: y0 + 18, w: fw, h: fh };
+  const py = field.y + fh + 8, g = 14;
   return {
-    y, slots,
+    rect: { x: KB.x, y: KB.y, w: KB.w, h: KB.h },
+    titleY: y0 + 11,
+    field,
+    submit: { x: cx - g / 2 - 104, y: py, w: 104, h: ph },
+    skip: { x: cx + g / 2, y: py, w: 84, h: ph },
+    hintY: py + ph + 14,
+  };
+}
+
+// ------------------------------------------------- the name entry (GAMEOVER and WIN)
+// ONE wide field, not three arcade slots: names run to twelve characters now. Desktop types into
+// it directly; a phone taps it, which focuses a real <input> parked exactly over the drawn field
+// (iOS will not raise a keyboard for anything else) and every keystroke arrives as an `input`
+// event - a virtual keyboard's keydown is keyCode 229 and tells us nothing at all.
+function newEntry() { return { active: false, done: false, sent: false, pending: false, name: '', msg: '', rank: 0, sentName: '', sentScore: 0, closedT: -1e9 }; }
+function nameEntryActive() { return !!(G && G.entry && G.entry.active); }
+// the block's top edge: under the score on either card, where the board would otherwise sit
+function entryBaseY() { return G && G.state === 'WIN' ? 196 : (G ? G.overQY : 84) + 124; }
+function entryLayout() {
+  const W = CONFIG.W, fw = CONFIG.LB_FIELD_W, fh = CONFIG.LB_FIELD_H, y = entryBaseY();
+  const py = y + fh + 14, ph = CONFIG.LB_PILL_H, g = CONFIG.LB_PILL_GAP;
+  return {
+    y,
+    field: { x: W / 2 - fw / 2, y, w: fw, h: fh },
     submit: { x: W / 2 - g / 2 - 116, y: py, w: 116, h: ph },
     skip: { x: W / 2 + g / 2, y: py, w: 96, h: ph },
     hintY: py + ph + 20,
   };
 }
 const inRect = (r, x, y) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+// the field in SCREEN px, wherever it happens to be drawn this frame
+function entryFieldScreen() {
+  const kb = kbLayout();
+  if (kb) return kb.field;
+  const f = entryLayout().field;
+  return { x: View.offsetX + f.x * View.scale, y: View.offsetY + f.y * View.scale, w: f.w * View.scale, h: f.h * View.scale };
+}
 
 // the hidden <input>. Built on demand, never while the entry is down, and always parked over the
-// slots: a tap must land on the REAL element or iOS will not open a keyboard for it.
+// drawn field: a tap must land on the REAL element or iOS will not open a keyboard for it.
 let nameInput = null;
 function nameInputEl() {
   if (nameInput) return nameInput;
   const el = document.createElement('input');
   el.type = 'text';
-  el.maxLength = 3;
-  el.setAttribute('maxlength', '3');
+  el.maxLength = CONFIG.LEADERBOARD.nameMax;
+  el.setAttribute('maxlength', String(CONFIG.LEADERBOARD.nameMax));
   el.setAttribute('autocapitalize', 'characters');
   el.setAttribute('autocomplete', 'off');
   el.setAttribute('autocorrect', 'off');
   el.setAttribute('spellcheck', 'false');
-  el.setAttribute('aria-label', 'your initials');
+  el.setAttribute('enterkeyhint', 'done');
+  el.setAttribute('aria-label', 'your name');
   el.style.cssText = 'position:fixed;left:-9999px;top:0;width:10px;height:10px;display:none;z-index:2;' +
     'opacity:0.01;color:transparent;background:transparent;caret-color:transparent;border:0;outline:none;' +
     'padding:0;margin:0;font-size:16px;text-align:center;touch-action:manipulation;-webkit-user-select:text;user-select:text';
-  el.addEventListener('input', onNameInput);
+  // `input` is the ONLY event a virtual keyboard can be trusted to fire with a usable value.
+  el.addEventListener('input', (ev) => {
+    // a form-less text input turns Enter/"done" into this, and never a keypress we could read
+    if (ev && (ev.inputType === 'insertLineBreak' || ev.inputType === 'insertParagraph')) { onNameInput(); submitEntry(); return; }
+    onNameInput();
+  });
+  el.addEventListener('compositionend', onNameInput);
+  // iOS turns the keyboard's "done" into a change + a blur. A tap on SKIP blurs it too, so the
+  // pointerdown that is about to skip disarms this first (pointerdown always beats the blur).
+  el.addEventListener('change', () => { onNameInput(); if (nowMs() - skipArmedT < 800) return; submitEntry(); });
   el.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); submitEntry(); }
+    if (e.key === 'Enter') { e.preventDefault(); onNameInput(); submitEntry(); }
     else if (e.key === 'Escape') { e.preventDefault(); skipEntry(); }
   });
   document.body.appendChild(el);
   nameInput = el;
   return el;
 }
+// mirror the element into the field: uppercase, filtered, truncated. The cleaned value is written
+// BACK only when it differs (writing every keystroke would fight the IME), caret parked at the end.
 function onNameInput() {
   const e = G && G.entry;
   if (!e || !e.active || !nameInput) return;
-  const v = LB.cleanName(nameInput.value);
-  if (nameInput.value !== v) nameInput.value = v;
-  for (let i = 0; i < 3; i++) e.chars[i] = v[i] || '';
-  e.slot = Math.min(2, v.length);
+  const v = LB.cleanTyping(nameInput.value);
+  if (nameInput.value !== v) {
+    nameInput.value = v;
+    try { nameInput.setSelectionRange(v.length, v.length); } catch (err) { /* not a text field yet */ }
+  }
+  e.name = v;
 }
-// parked over the three slots, in CSS px of the SCREEN, whenever a finger could reach for it
+// parked over the drawn field, in CSS px of the SCREEN, whenever a finger could reach for it
 function syncNameInput() {
   const e = G && G.entry;
   const want = !!(e && e.active && Touch.on);
   if (!want) { if (nameInput) { nameInput.style.display = 'none'; nameInput.style.left = '-9999px'; } return; }
-  const el = nameInputEl(), L = entryLayout(), a = L.slots[0], b = L.slots[2];
+  const el = nameInputEl(), r = entryFieldScreen();
   el.style.display = 'block';
-  el.style.left = (View.offsetX + a.x * View.scale) + 'px';
-  el.style.top = (View.offsetY + a.y * View.scale) + 'px';
-  el.style.width = ((b.x + b.w - a.x) * View.scale) + 'px';
-  el.style.height = (a.h * View.scale) + 'px';
+  el.style.left = r.x + 'px';
+  el.style.top = r.y + 'px';
+  el.style.width = Math.max(40, r.w) + 'px';
+  el.style.height = Math.max(24, r.h) + 'px';
 }
 function hideNameInput() {
   if (!nameInput) return;
   try { nameInput.blur(); } catch (err) { /* nothing focused */ }
   nameInput.style.display = 'none';
   nameInput.style.left = '-9999px';
+  KB.on = false;
 }
-// called straight out of the pointerdown handler, so the focus IS the user gesture iOS wants
+// a tap heading for SKIP must not be turned into a submit by the blur it causes: pointerdown runs
+// first, so arming it here is enough. updateNameEntry() does the actual skip on the next tick.
+let skipArmedT = -1e9;
+function nameEntryPointerDown(cx, cy) {
+  const e = G && G.entry;
+  if (!e || !e.active) return;
+  const kb = kbLayout();
+  const on = kb ? inRect(kb.skip, cx, cy)
+    : inRect(entryLayout().skip, (cx - View.offsetX) / View.scale, (cy - View.offsetY) / View.scale);
+  if (on) skipArmedT = nowMs();
+}
+// called straight out of the pointerdown handler, so the focus IS the user gesture iOS wants.
+// The whole block counts as the target: the field, and the TAP TO TYPE hint under the pills.
 function nameEntryTapFocus(cx, cy) {
   const e = G && G.entry;
   if (!e || !e.active || !Touch.on) return false;
-  const L = entryLayout(), a = L.slots[0], b = L.slots[2];
-  const x = View.offsetX + a.x * View.scale, y = View.offsetY + a.y * View.scale;
-  const w = (b.x + b.w - a.x) * View.scale, h = a.h * View.scale;
-  if (!(cx >= x && cx <= x + w && cy >= y && cy <= y + h)) return false;
+  const kb = kbLayout();
+  let hit = inRect(entryFieldScreen(), cx, cy);
+  if (!hit && !kb) {
+    const L = entryLayout(), lx = (cx - View.offsetX) / View.scale, ly = (cy - View.offsetY) / View.scale;
+    hit = lx > CONFIG.W / 2 - 160 && lx < CONFIG.W / 2 + 160 && ly > L.hintY - 16 && ly < L.hintY + 10;
+  }
+  if (!hit) return false;
   syncNameInput();
   const el = nameInputEl();
-  el.value = e.chars.join('');
-  try { el.focus(); } catch (err) { /* no keyboard: the slots still work by tap */ }
-  e.slot = clamp(Math.floor((cx - x) / Math.max(1, w / 3)), 0, 2);
+  el.value = e.name;
+  try { el.focus(); } catch (err) { /* no keyboard: SUBMIT and SKIP still work by tap */ }
+  try { el.setSelectionRange(e.name.length, e.name.length); } catch (err) { /* nothing selectable */ }
+  kbPin();
   Audio.click();
   return true;
 }
@@ -2955,98 +3120,134 @@ function beginNameEntry() {
   const e = G.entry;
   e.active = entryQualifies();
   if (!e.active) return;
-  const init = LB.cleanName(Save.data.initials) || 'AAA';
-  e.chars = [init[0] || 'A', init[1] || 'A', init[2] || 'A'];
-  e.slot = 0; e.msg = ''; e.rank = 0; e.pending = false;
+  e.name = LB.cleanName(Save.data.playerName) || 'SISTER';
+  e.msg = ''; e.rank = 0; e.pending = false;
+  kbRead();
   syncNameInput();
-  if (nameInput) nameInput.value = e.chars.join('');
+  if (nameInput) nameInput.value = e.name;
 }
+// desktop typing: one character on the end, and a space only where the server rule allows one
 function entryPut(ch) {
-  const e = G.entry;
-  e.chars[e.slot] = ch;
-  e.slot = Math.min(2, e.slot + 1);
-  if (nameInput) nameInput.value = e.chars.join('');
+  const e = G.entry, v = LB.cleanTyping(e.name + ch);
+  if (v === e.name) return;
+  e.name = v;
+  if (nameInput) nameInput.value = v;
   Audio.click();
 }
 function entryBack() {
   const e = G.entry;
-  if (e.chars[e.slot] && e.slot === 2 && e.chars[2]) e.chars[2] = '';
-  else { e.slot = Math.max(0, e.slot - 1); e.chars[e.slot] = ''; }
-  if (nameInput) nameInput.value = e.chars.join('');
+  if (!e.name) return;
+  e.name = e.name.slice(0, -1);
+  if (nameInput) nameInput.value = e.name;
   Audio.click();
 }
 function skipEntry() {
   const e = G.entry;
   if (!e.active) return;
-  e.active = false; e.done = true; e.msg = '';
+  e.active = false; e.done = true; e.msg = ''; e.closedT = RT;
   hideNameInput();
+  LB.fetchTop();   // the card shows the board the moment the entry gets out of its way
   Audio.click();
 }
 // exactly one CREATE per run. The card stops waiting the moment the POST is away.
 function submitEntry() {
   const e = G.entry;
   if (!e.active || e.sent) return;
-  const name = LB.cleanName(e.chars.join('')) || 'AAA';
-  const score = G.score, wave = G.wave;
-  e.sent = true; e.done = true; e.active = false; e.pending = true;
-  e.msg = 'SENDING TO THE PLAYBILL…';
-  Save.data.initials = name; Save.save();
+  const name = LB.cleanName(e.name) || 'SISTER';
+  const score = clamp(Math.round(G.score || 0), 0, 2000000) | 0, wave = G.wave;
+  e.sent = true; e.done = true; e.active = false; e.pending = true; e.closedT = RT;
+  e.name = name; e.sentName = name; e.sentScore = score;
+  e.msg = 'SENDING TO THE HOLY ORDER…';
+  Save.data.playerName = name; Save.save();
   hideNameInput();
   Audio.click();
   LB.submit(name, score, wave).then((okd) => {
-    if (!okd) { e.pending = false; e.msg = 'THE PLAYBILL COULD NOT BE REACHED'; return null; }
-    // re-read the board so the rank is the real one, ties and all
-    return LB.fetchTop(true).then(() => {
-      const rank = LB.rankOf(name, clamp(Math.round(score || 0), 0, 2000000) | 0);
+    if (!okd) { e.pending = false; e.msg = 'THE HOLY ORDER COULD NOT BE REACHED'; return null; }
+    // the board so the row can be picked out, and one aggregation call for the EXACT rank: the
+    // count of scores strictly above this one, plus one. If that fails, the top ten answers instead.
+    return LB.fetchTop(true).then(() => LB.rankExact(score)).then((rank) => {
+      if (!rank) rank = LB.rankOf(name, score);
       e.pending = false; e.rank = rank;
-      e.msg = rank ? 'YOU PLACED #' + rank + ' ON THE PLAYBILL' : 'ADDED TO THE PLAYBILL';
+      e.msg = rank ? 'YOU PLACED #' + rank + ' IN THE HOLY ORDER' : 'ADDED TO THE HOLY ORDER';
       return null;
     });
-  }).catch(() => { e.pending = false; e.msg = 'ADDED TO THE PLAYBILL'; });
+  }).catch(() => { e.pending = false; e.msg = 'ADDED TO THE HOLY ORDER'; });
 }
 // mouse/finger + keyboard, run from GAMEOVER and WIN while the entry is up. Nothing else gets a look
 // in while this is on screen: Enter submits, it does not retry.
 function updateNameEntry() {
   const e = G.entry;
+  kbRead();
   syncNameInput();
-  const m = Input.mouse;
+  const m = Input.mouse, kb = kbLayout();
   if (m.justDown) {
-    const L = entryLayout();
-    if (inRect(L.submit, m.x, m.y)) { submitEntry(); return; }
-    if (inRect(L.skip, m.x, m.y)) { skipEntry(); return; }
-    for (let i = 0; i < 3; i++) if (inRect(L.slots[i], m.x, m.y)) { e.slot = i; Audio.click(); return; }
+    if (kb) {
+      // the block is in screen space: hit-test it there, in the SCREEN px the finger arrived in
+      const cx = m.cx, cy = m.cy;
+      if (inRect(kb.submit, cx, cy)) { submitEntry(); return; }
+      if (inRect(kb.skip, cx, cy)) { skipEntry(); return; }
+    } else {
+      const L = entryLayout();
+      if (inRect(L.submit, m.x, m.y)) { submitEntry(); return; }
+      if (inRect(L.skip, m.x, m.y)) { skipEntry(); return; }
+    }
   }
-  // the hidden input has the caret: its own listeners mirror every keystroke into the slots
+  // the hidden input has the caret: its own listeners mirror every keystroke into the field
   if (nameInput && document.activeElement === nameInput) return;
-  if (Input.pressed('Enter')) { submitEntry(); return; }
-  if (Input.pressed('Escape')) { skipEntry(); return; }
-  if (Input.pressed('Backspace')) { entryBack(); return; }
-  for (const ch of ENTRY_ALPHABET) {
-    if (Input.pressed(ch >= '0' && ch <= '9' ? 'Digit' + ch : 'Key' + ch)) { entryPut(ch); return; }
+  // EVERY key that landed this tick, in the order it landed: a fast typist must not lose letters
+  for (const code of Array.from(Input.justPressed)) {
+    if (code === 'Enter') { submitEntry(); return; }
+    if (code === 'Escape') { skipEntry(); return; }
+    if (code === 'Backspace') { entryBack(); continue; }
+    if (code === 'Space') { entryPut(' '); continue; }
+    if (code.length === 4 && code.slice(0, 3) === 'Key') { entryPut(code.charAt(3)); continue; }
+    if (code.length === 6 && code.slice(0, 5) === 'Digit') { entryPut(code.charAt(5)); continue; }
   }
 }
-function drawEntryPill(c, r, label, hot) {
+function drawEntryPill(c, r, label, hot, fs) {
   pill(c, r.x, r.y, r.w, r.h, 0.62);
   rrect(c, r.x, r.y, r.w, r.h, Math.min(r.h / 2, 10), null, rgba(hot ? PAL.amber : PAL.cream, hot ? 0.75 : 0.3), 1.5);
-  uiText(c, label, r.x + r.w / 2, r.y + r.h / 2 + 5, FSANS(14), hot ? PAL.amber : rgba(PAL.cream, 0.8), 'center', { spacing: 3 });
+  uiText(c, label, r.x + r.w / 2, r.y + r.h / 2 + (fs || 14) * 0.35, FSANS(fs || 14), hot ? PAL.amber : rgba(PAL.cream, 0.8), 'center', { spacing: 3 });
 }
+// the wide name field: the typed name in sans caps, a blinking caret behind it, n/12 in the corner
+function drawNameField(c, r, name, hot, fs) {
+  const f = fs || 26;
+  rrect(c, r.x, r.y + 3, r.w, r.h, 6, 'rgba(0,0,0,0.45)');
+  rrect(c, r.x, r.y, r.w, r.h, 6, 'rgba(7,7,13,0.7)', rgba(hot ? PAL.amber : PAL.cream, hot ? 0.9 : 0.35), hot ? 2.5 : 1.5);
+  const font = FSANS(f), sp = 2;
+  const w = uiMeasure(c, name, font, sp);
+  const bx = r.x + r.w / 2 - w / 2, by = r.y + r.h * 0.68;
+  if (name) uiText(c, name, bx, by, font, PAL.cream, 'left', { spacing: sp, shadow: 2 });
+  c.fillStyle = rgba(PAL.amber, pulse(RT, 1.4, 0.15, 0.95));
+  c.fillRect(bx + w + 2, r.y + r.h * 0.22, 2, r.h * 0.56);
+  uiText(c, name.length + '/' + LB.nameMax, r.x + r.w - 8, r.y + r.h - 7, FSANS(Math.max(8, Math.round(f * 0.34))), rgba(PAL.cream, 0.4), 'right', { spacing: 1 });
+}
+// the entry on the CARD, in arena px: the normal place for it, keyboard down
 function drawNameEntry(c) {
-  const e = G.entry, L = entryLayout(), W = CONFIG.W;
-  uiText(c, 'THE PLAYBILL  ·  ENTER YOUR INITIALS', W / 2, L.y - 16, FSANS(12), rgba(PAL.cream, 0.6), 'center', { spacing: 4 });
-  const m = Input.mouse;
-  for (let i = 0; i < 3; i++) {
-    const s = L.slots[i], on = i === e.slot;
-    rrect(c, s.x, s.y + 3, s.w, s.h, 6, 'rgba(0,0,0,0.45)');
-    rrect(c, s.x, s.y, s.w, s.h, 6, 'rgba(7,7,13,0.7)', rgba(on ? PAL.amber : PAL.cream, on ? 0.9 : 0.3), on ? 2.5 : 1.5);
-    const ch = e.chars[i] || '';
-    if (ch) uiText(c, ch, s.x + s.w / 2, s.y + s.h * 0.72, FSANS(34), on ? PAL.amber : PAL.cream, 'center', { shadow: 2 });
-    // the caret under the live slot: the one thing that says "this one is listening"
-    if (on) { c.fillStyle = rgba(PAL.amber, pulse(RT, 1.4, 0.25, 0.9)); c.fillRect(s.x + 10, s.y + s.h - 9, s.w - 20, 2); }
-  }
+  const e = G.entry, L = entryLayout(), W = CONFIG.W, m = Input.mouse;
+  uiText(c, 'ENTER YOUR NAME', W / 2, L.y - 16, FSANS(12), rgba(PAL.cream, 0.6), 'center', { spacing: 4 });
+  drawNameField(c, L.field, e.name, true, 26);
   drawEntryPill(c, L.submit, 'SUBMIT', inRect(L.submit, m.x, m.y));
   drawEntryPill(c, L.skip, 'SKIP', inRect(L.skip, m.x, m.y));
-  const hint = Touch.on ? 'TAP A SLOT TO TYPE  ·  SUBMIT OR SKIP' : 'TYPE  ·  BACKSPACE  ·  ENTER TO SUBMIT  ·  ESC TO SKIP';
-  uiText(c, hint, W / 2, L.hintY, FSANS(11), rgba(PAL.cream, 0.5), 'center', { spacing: 2 });
+  const hint = Touch.on ? 'TAP TO TYPE  ·  SUBMIT OR SKIP' : 'TYPE  ·  BACKSPACE  ·  ENTER TO SUBMIT  ·  ESC TO SKIP';
+  uiText(c, hint, W / 2, L.hintY, FSANS(11), rgba(PAL.cream, Touch.on ? pulse(RT, 0.7, 0.45, 0.95) : 0.5), 'center', { spacing: 2 });
+}
+// ...and the same block in SCREEN px when the keyboard has eaten the card. Drawn from draw() after
+// the bars, so it sits over everything; the rest of the glass goes dark behind it.
+function drawEntryOverlay(c) {
+  const kb = kbLayout();
+  if (!kb) return;
+  const e = G.entry, m = Input.mouse, r = kb.rect;
+  c.save();
+  c.fillStyle = 'rgba(7,7,13,0.82)';
+  c.fillRect(0, 0, View.cssW, View.cssH);
+  rrect(c, r.x + 6, r.y + 4, r.w - 12, Math.min(r.h - 8, kb.hintY - r.y + 8), 10, 'rgba(7,7,13,0.9)', rgba(PAL.cream, 0.18), 1.5);
+  uiText(c, 'ENTER YOUR NAME', r.x + r.w / 2, kb.titleY, FSANS(11), rgba(PAL.cream, 0.65), 'center', { spacing: 4 });
+  drawNameField(c, kb.field, e.name, true, 22);
+  drawEntryPill(c, kb.submit, 'SUBMIT', inRect(kb.submit, m.cx, m.cy), 13);
+  drawEntryPill(c, kb.skip, 'SKIP', inRect(kb.skip, m.cx, m.cy), 13);
+  if (kb.hintY < r.y + r.h - 4) uiText(c, 'DONE ON THE KEYBOARD SUBMITS', r.x + r.w / 2, kb.hintY, FSANS(10), rgba(PAL.cream, 0.45), 'center', { spacing: 2 });
+  c.restore();
 }
 // the line that replaces the entry once the score is away (or was skipped)
 function drawEntryResult(c, y) {
@@ -3056,6 +3257,26 @@ function drawEntryResult(c, y) {
   pill(c, CONFIG.W / 2 - w / 2 - 22, y - 17, w + 44, 34, 0.5);
   const col = e.pending ? rgba(PAL.cream, pulse(RT, 0.9, 0.4, 0.85)) : e.rank ? PAL.amber : rgba(PAL.cream, 0.8);
   uiText(c, e.msg, CONFIG.W / 2, y, f, col, 'center', { spacing: 3 });
+}
+// the TITLE pill on both end cards: the board is reachable at any time, retry or no retry
+function titlePillRect() { const r = CONFIG.LB_TITLE_PILL; return { x: r.x, y: r.y, w: r.w, h: r.h }; }
+function drawTitlePill(c) {
+  const r = titlePillRect(), m = Input.mouse, hot = inRect(r, m.x, m.y);
+  pill(c, r.x, r.y, r.w, r.h, 0.55);
+  rrect(c, r.x, r.y, r.w, r.h, Math.min(r.h / 2, 10), null, rgba(hot ? PAL.amber : PAL.cream, hot ? 0.7 : 0.28), 1.5);
+  uiText(c, 'TITLE', r.x + r.w / 2, r.y + r.h / 2 + 5, FSANS(13), hot ? PAL.amber : rgba(PAL.cream, 0.78), 'center', { spacing: 3 });
+}
+// both end cards: the board, the row you just earned, and the exact rank under it
+function drawEndBoard(c) {
+  drawBoard(c, endBoardRect(), boardHighlightIndex());
+  const e = G.entry;
+  if (e.msg) drawEntryResult(c, CONFIG.LB_RANK_Y);
+}
+// a tap or Esc on either end card that must be answered before the retry/encore flow gets a look in
+function endCardPill() {
+  const m = Input.mouse;
+  if (Input.pressed('Escape')) return true;
+  return !!(m.justDown && inRect(titlePillRect(), m.x, m.y));
 }
 
 STATES.TITLE = {
@@ -3089,14 +3310,14 @@ STATES.TITLE = {
     drawRestless(c, 906, 424, 2.4, 0);
     drawYorick(c, 60, 470, 2.2, 1); drawYorick(c, 96, 456, 2.2, 0);
     c.restore();
-    // hero. Pulled down and in a touch (4.6 -> 4.05) so the playbill bill has the right shoulder of
-    // the poster to itself and her head still clears its bottom edge.
+    // hero. Pulled down and in a touch (4.6 -> 4.05) so the board has the right shoulder of the
+    // poster to itself and her head still clears its bottom edge.
     drawNunWithGun(c, 762, 502, 4.05, Math.PI - 0.55, 0.2);
     // the global top ten, pinned over the right-hand gate
-    drawPlaybill(c);
+    drawBoard(c, boardRect(), -1);
     // poster text
     uiText(c, 'GET THEE TO', 72, 150, FSERIF(56), PAL.cream, 'left', { shadow: 3, spacing: 1 });
-    uiText(c, 'A NUNNERY', 68, 244, FSERIF(86), PAL.cream, 'left', { shadow: 4 });   // 98 -> 86: the bill needs the right shoulder
+    uiText(c, 'A NUNNERY', 68, 244, FSERIF(86), PAL.cream, 'left', { shadow: 4 });   // 98 -> 86: the board needs the right shoulder
     rule(c, 72, 262, 380);
     uiText(c, 'She took the advice.', 74, 302, FSERIF(28, true), PAL.amber, 'left', { shadow: 2 });
     const hint = Touch.on ? 'LEFT THUMB MOVE   ·   RIGHT THUMB DRAG TO AIM, RELEASE TO FIRE   ·   TAP TO BEGIN' : 'WASD MOVE   ·   MOUSE AIM   ·   CLICK TO BEGIN';
@@ -3199,22 +3420,27 @@ function drawNewUnlocks(c, y) {
   ell(c, CONFIG.W / 2 - w / 2 - 8, y - 5, 4, 4, PAL.amber);
   uiText(c, str, CONFIG.W / 2 + 6, y, f, PAL.amber, 'center', { spacing: 3 });
 }
-// GAME OVER (ui-scratch.html): the quote, then the score, then whatever the run unlocked
+// GAME OVER (ui-scratch.html): the quote, then the score, then THE HOLY ORDER. The quote and the
+// score block are tighter than the Designer's mock so the board, the rank line and the pills all
+// fit above 540 with room to spare - on the phone letterbox too.
+const GO_Q = { y0: 84, step: 32, w: 720, px: 26 };
+function overQuoteLines(c, quote) { return uiWrap(c, '\u201c' + quote + '\u201d', FSERIF(GO_Q.px, true), GO_Q.w); }
+function overQuoteY(c, quote) { return GO_Q.y0 + (overQuoteLines(c, quote).length - 1) * GO_Q.step; }
 function drawGameOver(c, t, d) {
   const W = CONFIG.W;
   dim(c, 0.72); FX.vignette(c, 0.8);
-  const qf = FSERIF(30, true), ql = uiWrap(c, '“' + d.quote + '”', qf, 760);
-  ql.forEach((ln, k) => uiText(c, ln, W / 2, 152 + k * 38, qf, PAL.cream, 'center', { shadow: 2 }));
-  const qy = 152 + (ql.length - 1) * 38;
-  G.overQY = qy;   // update() hit-tests the initials entry against this too
-  rule(c, W / 2 - 44, qy + 24, 88);
-  uiText(c, 'SCORE', W / 2, qy + 66, FSANS(13), rgba(PAL.cream, 0.6), 'center', { spacing: 5 });
-  uiText(c, fmt(d.score), W / 2, qy + 126, FSANS(58), PAL.cream, 'center', { shadow: 3 });
-  uiText(c, 'BEST ' + fmt(d.best), W / 2, qy + 158, FSANS(14), rgba(PAL.cream, 0.7), 'center', { spacing: 3 });
+  const qf = FSERIF(GO_Q.px, true), ql = overQuoteLines(c, d.quote);
+  ql.forEach((ln, k) => uiText(c, ln, W / 2, GO_Q.y0 + k * GO_Q.step, qf, PAL.cream, 'center', { shadow: 2 }));
+  const qy = GO_Q.y0 + (ql.length - 1) * GO_Q.step;
+  G.overQY = qy;   // update() hit-tests the entry against this too
+  rule(c, W / 2 - 44, qy + 20, 88);
+  const sstr = 'SCORE ' + fmt(d.score), sf = FSANS(32);
+  uiText(c, sstr, W / 2, qy + 60, sf, PAL.cream, 'center', { spacing: 2, shadow: 3 });
+  uiText(c, 'BEST ' + fmt(d.best), W / 2, qy + 82, FSANS(13), rgba(PAL.cream, 0.7), 'center', { spacing: 3 });
   if (d.isNewBest) {
-    const sw = uiMeasure(c, fmt(d.score), FSANS(58), 0);
-    c.save(); c.translate(W / 2 + sw / 2 + 84, qy + 100); c.rotate(-0.14);
-    const k = 1 + 0.05 * Math.sin(t * 7); c.scale(k, k);
+    const sw = uiMeasure(c, sstr, sf, 2);
+    c.save(); c.translate(W / 2 + sw / 2 + 84, qy + 50); c.rotate(-0.14);
+    const k = 0.78 * (1 + 0.05 * Math.sin(t * 7)); c.scale(k, k);
     c.strokeStyle = PAL.amber; c.lineWidth = 2.5; c.lineCap = 'round'; c.beginPath();
     for (let i = 0; i < 8; i++) { const a = (i * TAU) / 8 + 0.2; c.moveTo(Math.cos(a) * 66, Math.sin(a) * 30); c.lineTo(Math.cos(a) * 80, Math.sin(a) * 40); }
     c.stroke();
@@ -3222,13 +3448,13 @@ function drawGameOver(c, t, d) {
     uiText(c, 'NEW BEST', 0, 7, FSANS(16), PAL.ink, 'center', { spacing: 3 });
     c.restore();
   }
-  // the initials entry slots in UNDER the score, and owns the card until it is submitted or skipped
-  if (G.entry.active) { drawNameEntry(c); return; }
-  if (G.entry.msg) {
-    drawEntryResult(c, qy + 200);
-    if (d.newUnlock) drawNewUnlocks(c, qy + 246);
-  } else if (d.newUnlock) drawNewUnlocks(c, qy + 208);
-  uiText(c, Touch.on ? 'TAP TO RETRY' : 'CLICK TO RETRY', W / 2, 482, FSANS(13), rgba(PAL.cream, pulse(t, 0.7, 0.45, 1)), 'center', { spacing: 4 });
+  // the name entry slots in UNDER the score, and owns the card until it is submitted or skipped.
+  // With the keyboard up it is drawn in screen space instead (draw() does that, over everything).
+  if (G.entry.active) { if (!kbEntryUp()) drawNameEntry(c); return; }
+  drawEndBoard(c);
+  if (d.newUnlock) drawNewUnlocks(c, G.entry.msg ? CONFIG.LB_UNLOCK_Y : CONFIG.LB_RANK_Y);
+  drawTitlePill(c);
+  uiText(c, Touch.on ? 'TAP TO RETRY' : 'CLICK TO RETRY', W / 2, CONFIG.LB_RETRY_Y, FSANS(13), rgba(PAL.cream, pulse(t, 0.7, 0.45, 1)), 'center', { spacing: 4 });
 }
 // WIN: confetti, the crown on the flagstones, and the line
 function drawCrown(c, x, y, s, rot) {
@@ -3240,21 +3466,22 @@ function drawCrown(c, x, y, s, rot) {
 function drawWin(c, t, d) {
   const W = CONFIG.W;
   dim(c, 0.6); FX.vignette(c, 0.7);
-  // shifted 60 px right of the Designer's mock so a NEW BLESSING pill never lands on her
-  drawShadow(c, 760, 486, 14, 4);
-  drawCrown(c, 760, 484, 3.2, 0.35);
-  drawNunWithGun(c, 820, 488, 3, Math.PI - 1.05, 0);
-  rrect(c, W / 2 - 370, 160, 740, 152, 8, 'rgba(7,7,13,0.55)');
-  uiText(c, 'THE REST IS SILENCE.', W / 2, 226, FSERIF(56), PAL.cream, 'center', { shadow: 3, spacing: 1 });
-  rule(c, W / 2 - 44, 244, 88);
-  // the encore line is a lie while the initials are being typed: Enter submits, it does not carry on
-  const ent = G.entry.active;
-  if (!ent) uiText(c, Touch.on ? 'ENCORE?  TAP TO TAKE IT' : 'ENCORE?  CLICK   ·   ESC TO BOW', W / 2, 286, FSANS(14), rgba(PAL.cream, pulse(t, 0.7, 0.5, 1)), 'center', { spacing: 3 });
-  uiText(c, 'SCORE ' + fmt(d.score), W / 2, ent ? 340 : 372, FSANS(28), PAL.cream, 'center', { spacing: 2, shadow: 2 });
-  if (d.best != null) uiText(c, 'BEST ' + fmt(d.best), W / 2, ent ? 366 : 400, FSANS(14), rgba(PAL.cream, 0.7), 'center', { spacing: 3 });
-  if (ent) { drawNameEntry(c); return; }
-  if (G.entry.msg) { drawEntryResult(c, 438); if (d.newUnlock) drawNewUnlocks(c, 484); }
-  else if (d.newUnlock) drawNewUnlocks(c, 440);
+  // shifted right of the Designer's mock so a NEW BLESSING pill never lands on her, then back left
+  // again once the board arrived: she keeps clear of the board's right edge AND of the TITLE pill
+  drawShadow(c, 712, 486, 14, 4);
+  drawCrown(c, 712, 484, 3.2, 0.35);
+  drawNunWithGun(c, 772, 488, 3, Math.PI - 1.05, 0);
+  // the banner is up at the top now: the middle of the card belongs to THE HOLY ORDER
+  rrect(c, W / 2 - 370, 52, 740, 100, 8, 'rgba(7,7,13,0.55)');
+  uiText(c, 'THE REST IS SILENCE.', W / 2, 104, FSERIF(44), PAL.cream, 'center', { shadow: 3, spacing: 1 });
+  rule(c, W / 2 - 44, 118, 88);
+  const line = 'SCORE ' + fmt(d.score) + (d.best != null ? '   \u00b7   BEST ' + fmt(d.best) : '');
+  uiText(c, line, W / 2, 142, FSANS(17), rgba(PAL.cream, 0.92), 'center', { spacing: 2, shadow: 2 });
+  if (G.entry.active) { if (!kbEntryUp()) drawNameEntry(c); return; }
+  drawEndBoard(c);
+  if (d.newUnlock) drawNewUnlocks(c, G.entry.msg ? CONFIG.LB_UNLOCK_Y : CONFIG.LB_RANK_Y);
+  drawTitlePill(c);
+  uiText(c, Touch.on ? 'ENCORE?  TAP TO TAKE IT' : 'ENCORE?  CLICK   \u00b7   ESC TO BOW', W / 2, CONFIG.LB_RETRY_Y, FSANS(14), rgba(PAL.cream, pulse(t, 0.7, 0.5, 1)), 'center', { spacing: 3 });
 }
 // iOS Safari has no Fullscreen API: the honest fix is Add to Home Screen. One small line, dismissible.
 function a2hsRect() { return { x: CONFIG.W - 24 - 382, y: 474, w: 382, h: 32 }; }
@@ -3299,14 +3526,18 @@ STATES.GAMEOVER = {
     G.texts.length = 0;   // neither state ticks updateTexts: a callout caught mid-flight would hang forever
     G.quote = pick(QUOTES); G.overT = 0;
     // the quote wrap decides where everything under it sits, and update() needs that before draw() runs
-    G.overQY = 152 + (uiWrap(ctx, '“' + G.quote + '”', FSERIF(30, true), 760).length - 1) * 38;
+    G.overQY = overQuoteY(ctx, G.quote);
     beginNameEntry();
+    if (!G.entry.active) LB.fetchTop();   // no entry to offer: go straight to showing her the board
     Audio.gameover();
   },
   exit() { hideNameInput(); },
   update(dt) {
     G.overT += dt;
     if (G.entry.active) { updateNameEntry(); return; }   // Enter submits; the retry flow waits its turn
+    // ...and the Enter/Esc that closed the entry is NOT a retry: hold still and let her see the board
+    if (RT - G.entry.closedT < CONFIG.LB_ENTRY_LOCK) return;
+    if (endCardPill()) { Audio.click(); setState('TITLE'); return; }   // the TITLE pill, or Esc
     if (G.overT > CONFIG.RETRY_LOCK && Input.anyStart()) { startRun(); }
   },
   draw(c) {
@@ -3319,12 +3550,14 @@ STATES.WIN = {
   enter() {
     Input.endTick(); G.overT = 0; G.texts.length = 0; bankRun(true);
     beginNameEntry();
+    if (!G.entry.active) LB.fetchTop();
   },
   exit() { hideNameInput(); },
   update(dt) {
     G.overT += dt;
-    if (G.entry.active) { updateNameEntry(); return; }   // no encore, no bow, until the slots are done
-    if (Input.pressed('Escape')) { Save.save(); setState('TITLE'); return; } // bow: the score is already banked
+    if (G.entry.active) { updateNameEntry(); return; }   // no encore, no bow, until the name is done
+    if (RT - G.entry.closedT < CONFIG.LB_ENTRY_LOCK) return;
+    if (endCardPill()) { Audio.click(); Save.save(); setState('TITLE'); return; } // bow: the score is already banked
     // Encore: carry the run on from wave 11 with every enemy type and a climbing multiplier
     if (G.overT > CONFIG.RETRY_LOCK && Input.anyStart()) {
       G.encore = true; G.player.gun.holdBlock = true;
@@ -3361,7 +3594,7 @@ STATES.PAUSED = {
 const Perf = { fps: 0, frameMs: 0, _frames: 0, _acc: 0 };
 const DEBUG = { on: /[?&]debug=1/.test(location.search) };
 function debugKeys() {
-  if (nameEntryActive()) return;   // she is typing her initials: M is a letter, not the mute key
+  if (nameEntryActive()) return;   // she is typing her name: M is a letter, not the mute key
   if (Input.pressed('Backquote')) DEBUG.on = !DEBUG.on;
   if (Input.pressed('KeyM')) Audio.toggleMute();
   if (!DEBUG.on || G.state !== 'PLAYING') return;
@@ -3439,14 +3672,26 @@ const GAME = {
   get firePill() { return Touch.on ? firePillRect() : null; },                                    // arena px
   get sticks() { return touchSnapshot(); },
   get rotatePrompt() { return rotateBlocked(); },
-  // ---- THE PLAYBILL. Plain values: the harness reads the whole board in one evaluate.
+  // ---- THE HOLY ORDER. Plain values: the harness reads the whole board in one evaluate.
   get leaderboard() { return { available: LB.available(), status: LB.status(), top: LB.top ? LB.top.map((r) => ({ name: r.name, score: r.score, wave: r.wave })) : null, lastError: LB.lastError }; },
   get leaderboardCollection() { return LB.collection; }, set leaderboardCollection(v) { LB.collection = v; },
   refreshLeaderboard(force) { LB.fetchTop(force !== false); return true; },
   submitScore(name, score, wave) { return LB.submit(name, score, wave); },
-  get nameEntry() { const e = G.entry; return { active: e.active, done: e.done, sent: e.sent, pending: e.pending, name: e.chars.join(''), chars: e.chars.slice(), slot: e.slot, msg: e.msg, rank: e.rank }; },
-  get entryUI() { const L = entryLayout(); return { slots: L.slots, submit: L.submit, skip: L.skip }; },   // arena px
-  get initials() { return Save.data.initials; },
+  get nameEntry() { const e = G.entry; return { active: e.active, done: e.done, sent: e.sent, pending: e.pending, name: e.name, len: e.name.length, msg: e.msg, rank: e.rank, sentName: e.sentName }; },
+  get entryUI() { const L = entryLayout(); return { field: L.field, submit: L.submit, skip: L.skip, hintY: L.hintY }; },   // arena px
+  get playerName() { return Save.data.playerName; },
+  get initials() { return Save.data.playerName; },                       // the old name for the same thing
+  cleanName(s) { return LB.cleanName(s); },
+  validName(s) { return LB.validName(s); },
+  // the end card: the board, the row this run earned, and the TITLE pill (arena px)
+  get endCard() {
+    const e = G.entry, on = (G.state === 'GAMEOVER' || G.state === 'WIN') && !e.active;
+    return { board: on, rect: endBoardRect(), highlight: on ? boardHighlightIndex() : -1, rank: e.rank, rankLine: e.msg, titlePill: titlePillRect() };
+  },
+  // the keyboard-aware entry block. `rects` are SCREEN css px; null means the normal card layout.
+  get keyboard() { return { up: KB.on, entryUp: kbEntryUp(), rect: { x: KB.x, y: KB.y, w: KB.w, h: KB.h }, layoutH: kbLayoutH(), layout: kbLayout() }; },
+  // the harness cannot shrink a real visualViewport: this fakes one so the layout can be checked
+  debugKeyboardRect(h) { KB.forced = Math.max(0, +h || 0); kbRead(); syncNameInput(); return { on: KB.on, layout: kbLayout() }; },
   // debug only: land straight on a GAMEOVER card with a chosen score, entry and all
   forceGameOver(score, wave) {
     if (G.state !== 'PLAYING') startRun();
@@ -3533,7 +3778,7 @@ function draw() {
   ctx.setTransform(d, 0, 0, d, 0, 0);
   drawBars(ctx);
   if (rotateBlocked()) drawRotateScreen(ctx);   // the overlay eats every touch: no live buttons under it
-  else drawTouchUI(ctx);
+  else { drawTouchUI(ctx); drawEntryOverlay(ctx); }   // the keyboard-up entry block owns the glass
 }
 let last = 0, acc = 0;
 function frame(now) {
