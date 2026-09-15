@@ -8,7 +8,7 @@ service cloud.firestore {
       allow create: if col in ['scores', 'scores_test']
         && request.resource.data.keys().hasOnly(['name', 'score', 'wave', 'v'])
         && request.resource.data.name is string
-        && request.resource.data.name.matches('^[A-Z0-9]{1,3}$')
+        && request.resource.data.name.matches('^[A-Z0-9][A-Z0-9 ]{0,11}$')
         && request.resource.data.score is int
         && request.resource.data.score >= 0 && request.resource.data.score <= 2000000
         && request.resource.data.wave is int
