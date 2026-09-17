@@ -92,10 +92,15 @@ const CONFIG = {
   // unlocks and HARD HABIT (spec §8)
   UNLOCK_WAVE: 5, UNLOCK_KILLS: 500, UNLOCK_RUNS: 3, UNLOCK_WINS: 1,
   HARD_WAVE: 4, HARD_HEARTS: 2, HARD_MULT: 1.5, HARD_PILL_W: 214, HARD_PILL_H: 34, HARD_PILL_X: 66, HARD_PILL_Y: 388,
-  // the title poster's hero, the box you can tap on her, and the character pill under her feet.
-  // The M keycap moved up under the board (TITLE_MUTE_Y) so the pill has the bottom corner alone.
+  // the title poster's hero. She is the LAST character chosen, and nothing else: the choice itself
+  // is made on the VOWS card. With no pill under her feet the M keycap has its old corner back.
   TITLE_HERO_X: 762, TITLE_HERO_Y: 494, TITLE_HERO_S: 4.05, TITLE_HERO_W: 92, TITLE_HERO_H: 140,
-  CHAR_PILL_H: 28, CHAR_PILL_Y: 500, TITLE_MUTE_Y: 336,
+  TITLE_MUTE_Y: 488,
+  // TAKE YOUR VOWS: the character choice, drawn over the dimmed poster on the way into a run. Two
+  // cards in the Blessing style, the same 400 ms entrance, and the hero of each drawn large facing
+  // inward. VOW_HERO_FEET/DX are measured from the card's top-left corner and its centre line.
+  VOW_CARD_W: 300, VOW_CARD_H: 305, VOW_CARD_GAP: 56, VOW_CARD_Y: 118,
+  VOW_HERO_S: 5.2, VOW_HERO_FEET: 225, VOW_HERO_DX: 22, VOW_HERO_ANG: 0.55, VOW_HINT_Y: 478,
   // the Ghost (spec §5): enters on the border point behind the player's aim, wave 6+, dissolves upward
   GHOST_ALPHA: 0.72, GHOST_WAVER_AMP: 0.32, GHOST_WAVER_FREQ: 2.4, GHOST_WISPS: 14, GHOST_RISE: -260, GHOST_FADE_T: 1.0,
   // music (spec §12 last row): own gain ~12 dB under the sfx bus, ducked on every shot
@@ -716,13 +721,13 @@ function touchButtons() {
   // reach into it. On the title they take the top-LEFT corner instead: there is nothing up there
   // but wall. In play they are back where the thumbs expect them, clear of the hearts.
   const play = G.state === 'PLAYING';
-  const left = G.state === 'TITLE';
+  const left = G.state === 'TITLE' || G.state === 'VOWS';   // the vows card sits over the poster
   let x = left ? Safe.left + pad + R : View.cssW - Safe.right - pad - R;
   const out = [];
   const add = (id) => { out.push({ id, x, y }); x += left ? CONFIG.TOUCH_BTN_GAP : -CONFIG.TOUCH_BTN_GAP; };
   if (play) add('pause');
-  if (play || G.state === 'TITLE') add('mute');
-  if ((play || G.state === 'TITLE') && fullscreenAvailable()) add('fullscreen');
+  if (play || left) add('mute');
+  if ((play || left) && fullscreenAvailable()) add('fullscreen');
   return out;
 }
 // screen-space hit test, 48 CSS px boxes
@@ -793,7 +798,7 @@ function uiForget() { UI.down.clear(); UI.stale.clear(); UI.id = null; UI.target
 // the title starts on the first click, as it always has; the cards you can lose a run on wait a beat
 function uiArmed() {
   const st = G && G.state;
-  if (st === 'GAMEOVER' || st === 'WIN' || st === 'PAUSED') return nowMs() - UI.armT >= CONFIG.UI_ARM_MS;
+  if (st === 'GAMEOVER' || st === 'WIN' || st === 'PAUSED' || st === 'VOWS') return nowMs() - UI.armT >= CONFIG.UI_ARM_MS;
   return true;
 }
 // SCREEN css px in, the name of whatever is under it out. 'bg' is the rest of the card - the
@@ -811,9 +816,12 @@ function uiTargetAt(cx, cy, pad) {
   if (st === 'TITLE') {
     if (hardUnlocked() && hitL(hardPillRect())) return 'hard';
     if (showA2HS() && hitL(a2hsCloseRect())) return 'a2hs';
-    if (hitL(charPillRect())) return 'pill:char';   // ...and the hero herself swaps, she never starts
-    if (hitL(heroRect())) return 'hero';
-    return 'bg';
+    return 'bg';   // anywhere else on the poster: TAP TO BEGIN, which opens the vows
+  }
+  if (st === 'VOWS') {
+    if (!vowsReady()) return 'bg';   // the entrance owns the screen
+    const i = vowAt(lx, ly, lpad);
+    return i >= 0 ? 'vow:' + CHARACTERS[i].id : 'bg';
   }
   if (st === 'UPGRADE') {
     if (!cardsReady()) return 'bg';   // the entrance owns the screen
@@ -925,7 +933,7 @@ const Input = (() => {
     // every other state (title, cards, pause, retry, encore): the press only NAMES what it landed
     // on - onUp decides whether that was a tap. Two things must still happen inside the gesture
     // itself, because the browser will not accept a release as a reason for either.
-    if (G && (G.state === 'TITLE' || G.state === 'GAMEOVER' || G.state === 'WIN')) fullscreenOnStart();
+    if (G && (G.state === 'TITLE' || G.state === 'VOWS' || G.state === 'GAMEOVER' || G.state === 'WIN')) fullscreenOnStart();
     nameEntryPointerDown(cx, cy);
     mouse.cx = cx; mouse.cy = cy; refreshMouse();
     mouse.down = true;
@@ -2789,42 +2797,102 @@ const hardUnlocked = () => unlocked('hardhabit');
 const hardMult = () => (G && G.hard ? CONFIG.HARD_MULT : 1);
 function hardPillRect() { return { x: CONFIG.HARD_PILL_X, y: CONFIG.HARD_PILL_Y, w: CONFIG.HARD_PILL_W, h: CONFIG.HARD_PILL_H }; }
 
-// ---- CHARACTER SELECT (the title poster only). The hero herself is a target, and so is the pill
-// under her feet; C does the same on a keyboard. The pill is sized for the LONGEST name there is,
-// so it never resizes under the finger that is tapping it.
-const charPillFont = () => FSANS(12);
-function charPillRect() {
-  const cap = Touch.on ? 0 : 28;   // the C keycap only exists where there is a C to press
-  // the WIDEST name, always: the pill must not jump under the finger that is toggling it
-  let nw = 0;
-  for (const d of CHARACTERS) nw = Math.max(nw, uiMeasure(ctx, d.name, charPillFont(), 1.6));
-  const w = Math.round(28 + cap + nw + 9 + uiMeasure(ctx, '⇄', FSANS(13), 0));
-  return { x: Math.round(CONFIG.TITLE_HERO_X - w / 2), y: CONFIG.CHAR_PILL_Y, w, h: CONFIG.CHAR_PILL_H };
-}
+// ---- THE TWO OF THE ORDER: the choice itself. The poster's hero is only ever the LAST character
+// chosen - a decoration, not a switch. Pressing start on the title opens TAKE YOUR VOWS instead,
+// and that card is where she (or he) is picked. The geometry below is the Blessing card's, widened.
 function heroRect() {
   const w = CONFIG.TITLE_HERO_W, h = CONFIG.TITLE_HERO_H;
   return { x: CONFIG.TITLE_HERO_X - w / 2, y: CONFIG.TITLE_HERO_Y - h, w, h };
 }
-// the swap: a puff of bone off her shoulders, a soft tick, and the poster reads the other way
+// the swap: a puff of bone off her shoulders, a soft tick, and the poster reads the other way.
+// Kept for the harness (GAME.swapCharacter) - nothing on the title toggles any more.
 function swapCharacter() {
   const id = setCharId(otherCharId());
-  FX.burst(CONFIG.TITLE_HERO_X, CONFIG.TITLE_HERO_Y - 62, 22, {
-    color: [PAL.bone, PAL.cream, PAL.boneShade], minSpeed: 40, maxSpeed: 190,
-    minLife: 0.3, maxLife: 0.8, minSize: 2, maxSize: 4.5, grav: 150, drag: 0.9,
-  });
+  charPuff(CONFIG.TITLE_HERO_X, CONFIG.TITLE_HERO_Y - 62);
   Audio.tick();
   haptic(CONFIG.HAPTIC_FIRE);
   return id;
 }
-function drawCharPill(c) {
-  const r = charPillRect(), d = charDef(charId()), m = Input.mouse, hot = inRect(r, m.x, m.y);
-  pill(c, r.x, r.y, r.w, r.h, 0.55);
-  rrect(c, r.x, r.y, r.w, r.h, Math.min(r.h / 2, 10), null, rgba(hot ? PAL.amber : PAL.cream, hot ? 0.7 : 0.3), 1.5);
-  const y = r.y + r.h / 2 + 4.5;
-  let x = r.x + 14;
-  if (!Touch.on) { keycap(c, x, r.y + 4, 'C', 20); x += 28; }
-  uiText(c, d.name, x, y, charPillFont(), hot ? PAL.amber : PAL.cream, 'left', { spacing: 1.6 });
-  uiText(c, '⇄', r.x + r.w - 12, y, FSANS(13), rgba(hot ? PAL.amber : PAL.cream, 0.7), 'right');
+function charPuff(x, y) {
+  FX.burst(x, y, 22, {
+    color: [PAL.bone, PAL.cream, PAL.boneShade], minSpeed: 40, maxSpeed: 190,
+    minLife: 0.3, maxLife: 0.8, minSize: 2, maxSize: 4.5, grav: 150, drag: 0.9,
+  });
+}
+
+// ---- TAKE YOUR VOWS. One card per character, side by side, cream for the nun and amber for the
+// priest. They fly in on the Blessing cards' own 400 ms entrance and answer nothing until it lands.
+const VOW_COL = { nun: PAL.cream, priest: PAL.amber };
+function vowRect(i) {
+  const w = CONFIG.VOW_CARD_W, gap = CONFIG.VOW_CARD_GAP, n = CHARACTERS.length;
+  const x0 = CONFIG.W / 2 - (n * w + (n - 1) * gap) / 2;
+  return { x: x0 + i * (w + gap), y: CONFIG.VOW_CARD_Y, w, h: CONFIG.VOW_CARD_H };
+}
+function vowAt(lx, ly, pad) {
+  pad = pad || 0;
+  for (let i = 0; i < CHARACTERS.length; i++) {
+    const r = vowRect(i);
+    if (lx >= r.x - pad && lx <= r.x + r.w + pad && ly >= r.y - pad && ly <= r.y + r.h + pad) return i;
+  }
+  return -1;
+}
+function vowIntroMs() { return G ? (RT - G.vowShowT) * 1000 : 1e9; }
+function vowIntroK(i) {
+  const n = CHARACTERS.length;
+  const span = Math.max(1, CONFIG.CARD_INTRO_MS - (n - 1) * CONFIG.CARD_STAGGER_MS);
+  return clamp01((vowIntroMs() - i * CONFIG.CARD_STAGGER_MS) / span);
+}
+function vowsReady() { return vowIntroMs() >= CONFIG.CARD_INTRO_MS; }
+// the highlight moves; nothing is chosen until a card is taken
+function moveVow(d) {
+  const n = CHARACTERS.length;
+  const i = (G.vowSel + d + n) % n;
+  if (i === G.vowSel) return;
+  G.vowSel = i; Audio.click(); haptic(CONFIG.HAPTIC_FIRE);
+}
+// taking the vow: the character is saved, she goes up in a puff of bone, and the run starts on the
+// SAME gesture the tap began - the fullscreen request already went out on the press.
+function takeVow(i) {
+  const d = CHARACTERS[clamp(i | 0, 0, CHARACTERS.length - 1)];
+  const r = vowRect(i);
+  G.vowSel = i;
+  setCharId(d.id);
+  charPuff(r.x + r.w / 2, r.y + CONFIG.VOW_HERO_FEET - 62);
+  Audio.tick();
+  haptic(CONFIG.HAPTIC_FIRE);
+  startRun();
+  return d.id;
+}
+function drawVows(c) {
+  const W = CONFIG.W, t = RT;
+  dim(c, 0.72); FX.vignette(c, 0.75);
+  uiText(c, 'TAKE YOUR VOWS', W / 2, 74, FSERIF(28), PAL.cream, 'center', { spacing: 3, shadow: 3 });
+  rule(c, W / 2 - 72, 88, 144);
+  for (let i = 0; i < CHARACTERS.length; i++) {
+    const d = CHARACTERS[i], r = vowRect(i), sel = i === G.vowSel, col = VOW_COL[d.id] || PAL.cream;
+    const k = vowIntroK(i), cx = r.x + r.w / 2;
+    c.save();
+    c.globalAlpha = k;
+    if (k < 1) {
+      const sc = 0.86 + 0.14 * easeOutBack(k), dy = (1 - easeOutCubic(k)) * 30;
+      const my = r.y + r.h / 2;
+      c.translate(cx, my + dy); c.scale(sc, sc); c.translate(-cx, -my);
+    }
+    rrect(c, r.x + 5, r.y + 9, r.w, r.h, 12, 'rgba(0,0,0,0.5)');
+    rrect(c, r.x, r.y, r.w, r.h, 12, sel ? '#1d1e33' : '#12131f', col, sel ? 4 : 3);
+    if (sel) rrect(c, r.x - 5, r.y - 5, r.w + 10, r.h + 10, 16, null, rgba(col, 0.35 + 0.15 * Math.sin(t * 5)), 3);
+    // the hero, large, facing the middle of the screen, shotgun in hand and breathing
+    const inward = i === 0 ? 1 : -1;          // card 0 looks right, the last card looks left
+    const ang = inward > 0 ? CONFIG.VOW_HERO_ANG : Math.PI - CONFIG.VOW_HERO_ANG;
+    const bob = Math.sin(t * 2 + i * 1.3) * 2.5;
+    drawCharacterWithGun(d.id, c, cx - inward * CONFIG.VOW_HERO_DX, r.y + CONFIG.VOW_HERO_FEET + bob, CONFIG.VOW_HERO_S, ang, 0.2);
+    uiText(c, d.name, cx, r.y + 258, FSANS(19), sel ? PAL.cream : rgba(PAL.cream, 0.82), 'center', { spacing: 2, shadow: 2 });
+    uiText(c, d.pronounSub, cx, r.y + 287, FSERIF(18, true), rgba(PAL.amber, sel ? 1 : 0.75), 'center', { shadow: 2 });
+    if (!Touch.on) keycap(c, cx - 11, r.y + r.h + 16, String(i + 1));
+    c.restore();
+  }
+  const hint = Touch.on ? 'TAP A CARD TO TAKE THE VOW' : '← → CHOOSE   ·   ENTER TAKES THE VOW   ·   ESC GOES BACK';
+  uiText(c, hint, W / 2, CONFIG.VOW_HINT_Y, FSANS(13), rgba(PAL.cream, pulse(t, 0.7, 0.5, 1)), 'center', { spacing: 2, shadow: 1 });
 }
 
 // ---- the card screen (geometry and drawing lifted from the Designer's ui-scratch.html)
@@ -2934,7 +3002,8 @@ function newGame() {
     entry: newEntry(),
     bankedKills: 0, bankedRun: false,
     picks: {}, cards: [], cardHover: -1, cardSel: -1, cardT: 0, cardShowT: -1e9, newUnlocks: [], hard: false,
-    character: charId(),   // whoever was chosen on the poster: the run keeps its own copy
+    vowSel: Math.max(0, CHARACTERS.indexOf(charDef(charId()))), vowShowT: -1e9,   // TAKE YOUR VOWS
+    character: charId(),   // whoever took the vow: the run keeps its own copy
   };
 }
 const STATES = {};
@@ -3604,10 +3673,9 @@ STATES.TITLE = {
     // the HARD HABIT pill is its own target, so the toggle never starts a run by accident
     if (hardUnlocked() && (Input.pressed('KeyH') || uiTapped('hard'))) { Opt.hard = !Opt.hard; Audio.click(); return; }
     if (showA2HS() && uiTapped('a2hs')) { hintDismiss('a2hs'); Audio.click(); return; }   // the small x
-    // ...and neither does the character swap: the hero and her pill are targets of their own
-    if (Input.pressed('KeyC') || uiTapped('hero') || uiTapped('pill:char')) { swapCharacter(); return; }
     FX.update(dt);   // the poster is the only screen outside play that has particles of its own
-    if (Input.anyStart()) { startRun(); return; }
+    // start no longer starts: it asks who is holding the shotgun first
+    if (Input.anyStart()) { Audio.click(); setState('VOWS'); return; }
   },
   // the poster (ui-scratch.html): torchlit courtyard, the dead at the gates, the hero at 4.6x
   draw(c) {
@@ -3626,10 +3694,9 @@ STATES.TITLE = {
     drawYorick(c, 60, 470, 2.2, 1); drawYorick(c, 96, 456, 2.2, 0);
     c.restore();
     // hero. Pulled down and in a touch (4.6 -> 4.05) so the board has the right shoulder of the
-    // poster to itself and her head still clears its bottom edge. Tap her to change who she is.
+    // poster to itself and her head still clears its bottom edge. She is whoever took the last vow.
     drawCharacterWithGun(charId(), c, CONFIG.TITLE_HERO_X, CONFIG.TITLE_HERO_Y, CONFIG.TITLE_HERO_S, Math.PI - 0.55, 0.2);
-    FX.draw(c);   // the bone puff off the last swap
-    drawCharPill(c);
+    FX.draw(c);   // the bone puff off the last vow
     // the global top ten, pinned over the right-hand gate
     drawBoard(c, boardRect(), -1);
     // poster text
@@ -3650,9 +3717,9 @@ STATES.TITLE = {
     }
     const s = Save.data;
     uiText(c, 'BEST ' + fmt(s.hi) + '   ·   WAVE ' + (s.bestWave || 0), 72, 504, FSANS(14), rgba(PAL.cream, 0.85), 'left', { spacing: 1.5, shadow: 1 });
-    // the touch build has a mute button on the canvas; the keycap hint would be a lie there
-    // the M keycap used to sit in the bottom-right corner; the character pill has that corner now,
-    // so it moved up into the gap between the board's bottom edge and the hero's head.
+    // the touch build has a mute button on the canvas; the keycap hint would be a lie there.
+    // The M keycap is back in the bottom-right corner, level with BEST: the character pill that
+    // pushed it up under the board is gone, and TAKE YOUR VOWS has the choice now.
     if (!Touch.on) {
       const my = CONFIG.TITLE_MUTE_Y;
       const mlab = Audio.muted ? 'MUTED' : 'MUTE';
@@ -3663,6 +3730,38 @@ STATES.TITLE = {
       if (Audio.gestured && Audio.needsUnlock) ell(c, W - 65, my + 5, 3, 3, PAL.amber, PAL.ink, 1);
     }
     if (showA2HS()) drawA2HS(c);
+  },
+};
+
+// TAKE YOUR VOWS: the character choice, over the dimmed poster, on the way into every run started
+// from the title. A retry never comes through here - that keeps whoever just died.
+STATES.VOWS = {
+  enter() {
+    Input.endTick();
+    G.vowSel = Math.max(0, CHARACTERS.indexOf(charDef(charId())));   // the last vow is the one lit
+    G.vowShowT = RT;
+  },
+  update(dt) {
+    FX.update(dt);
+    if (Input.pressed('Escape')) { Audio.click(); setState('TITLE'); return; }   // back to the poster
+    if (!vowsReady()) return;   // the entrance owns the screen: no taps, no keys
+    if (Input.pressed('ArrowLeft') || Input.pressed('KeyA')) { moveVow(-1); return; }
+    if (Input.pressed('ArrowRight') || Input.pressed('KeyD')) { moveVow(1); return; }
+    let choice = -1;
+    if (Input.pressed('Digit1')) choice = 0;
+    else if (Input.pressed('Digit2')) choice = 1;
+    else if (Input.pressed('Enter') || Input.pressed('Space')) choice = G.vowSel;
+    else if (UI.tap && UI.tap.slice(0, 4) === 'vow:') {
+      // one tap is enough here: there is no stick under a thumb on the title, so nothing can be
+      // holding the glass across the transition except a finger the stale rule already killed
+      const i = CHARACTERS.findIndex((d) => d.id === UI.tap.slice(4));
+      if (i >= 0) choice = i;
+    }
+    if (choice >= 0) takeVow(choice);
+  },
+  draw(c) {
+    STATES.TITLE.draw(c);   // the poster, still lit, under the card
+    drawVows(c);
   },
 };
 
@@ -4009,9 +4108,13 @@ const GAME = {
   get characters() { return CHARACTERS.map((d) => ({ id: d.id, c: d.c, name: d.name, title: d.title })); },
   get characterInfo() {
     const d = charDef(charId());
-    return { id: d.id, c: d.c, name: d.name, title: d.title, subtitle: d.pronounSub, run: runCharId(), hero: heroRect(), pill: charPillRect() };
+    return { id: d.id, c: d.c, name: d.name, title: d.title, subtitle: d.pronounSub, run: runCharId(), hero: heroRect() };
   },
   swapCharacter() { return swapCharacter(); },
+  // ---- TAKE YOUR VOWS (arena px). `vowsHighlight` is the card the keyboard/last choice is on.
+  get vowsHighlight() { return G ? G.vowSel : -1; },
+  get vowsReady() { return G.state === 'VOWS' ? vowsReady() : false; },
+  get vowCards() { return CHARACTERS.map((d, i) => ({ id: d.id, name: d.name, rect: vowRect(i) })); },
   get nameEntry() { const e = G.entry; return { active: e.active, done: e.done, sent: e.sent, pending: e.pending, name: e.name, len: e.name.length, msg: e.msg, rank: e.rank, sentName: e.sentName }; },
   get entryUI() { const L = entryLayout(); return { field: L.field, submit: L.submit, skip: L.skip, hintY: L.hintY }; },   // arena px
   get playerName() { return Save.data.playerName; },
@@ -4136,7 +4239,7 @@ function frame(now) {
   // render-time systems: shake, kick, flashes, slow-mo timer, the music scheduler
   FX.tickRender(dt);
   decalBudget = CONFIG.DECALS_PER_FRAME;
-  Music.set(G.state === 'PLAYING' ? 'play' : G.state === 'TITLE' || G.state === 'UPGRADE' ? 'drone' : 'off', G.wave || 1);
+  Music.set(G.state === 'PLAYING' ? 'play' : G.state === 'TITLE' || G.state === 'VOWS' || G.state === 'UPGRADE' ? 'drone' : 'off', G.wave || 1);
   Music.update();
   // portrait phone: the whole sim holds behind the ROTATE overlay, and picks up where it left off
   if (rotateBlocked()) { clearTouch(); hideNameInput(); Input.endTick(); acc = 0; draw(); Perf.frameMs = Perf.frameMs * 0.9 + (performance.now() - t0) * 0.1; return; }

@@ -25,6 +25,13 @@ async function waitFor(label, expr, timeoutMs = 5000) {
   while (Date.now() - t0 < timeoutMs) { if (await G(expr)) return true; await sleep(50); }
   fail(`timeout waiting for ${label} (${expr})`); return false;
 }
+// TAKE YOUR VOWS sits between the title and the run now: start, then take the vow on the left card.
+const vowCentre = async (i) => JSON.parse(await b.eval(`JSON.stringify((() => { const r = window.GAME.vowCards[${i}].rect; return window.GAME.toScreen(r.x + r.w / 2, r.y + r.h / 2); })())`));
+async function beginRun(x = W / 2, y = H / 2) {
+  await b.click(x, y);
+  await sleep(500);                                   // past the 400 ms card entrance
+  if (await G(`G.state === 'VOWS'`)) { const p = await vowCentre(0); await b.click(p.x, p.y); await sleep(200); }
+}
 const snapshot = () => G(`JSON.stringify({state:G.state, wave:G.wave, score:G.score, hp:G.hp, shells:G.shells, enemies:G.enemies, pellets:G.pellets, particles:G.particleCount, fps:Math.round(G.fps||0)})`);
 const checkErrors = (label) => { if (b.errors.length) { fail(`${label}: ${b.errors.length} error(s): ` + b.errors.slice(0, 3).join(' | ')); b.errors.length = 0; } else ok(`${label}: no console errors`); };
 
@@ -36,9 +43,22 @@ checkErrors('load');
 if (!(await G('true'))) fail('window.GAME debug API missing');
 else ok('window.GAME present: ' + (await snapshot()));
 
-console.log('== start run via click');
+console.log('== start run via click (through TAKE YOUR VOWS)');
 await b.click(W / 2, H / 2);
-if (await waitFor('PLAYING after click', `G.state === 'PLAYING'`, 4000)) ok('in game after a click');
+await sleep(250);
+if (await G(`G.state === 'VOWS'`)) ok('a click on the poster opens TAKE YOUR VOWS');
+else fail('the title did not open the vows card: ' + (await G('G.state')));
+await sleep(400);
+await shot('01b-vows');
+if ((await G('G.vowsHighlight')) === 0) ok('the last character chosen is the highlighted card'); else fail('bad vows highlight: ' + (await G('G.vowsHighlight')));
+await b.press('Escape'); await sleep(250);
+if (await G(`G.state === 'TITLE'`)) ok('Esc backs out of the vows to the poster'); else fail('Esc did not leave the vows: ' + (await G('G.state')));
+await b.click(W / 2, H / 2); await sleep(500);
+await b.press('ArrowRight'); await sleep(120);
+if ((await G('G.vowsHighlight')) === 1) ok('→ moves the highlight to FATHER HORATIO'); else fail('the arrow keys did not move the highlight');
+await b.press('ArrowLeft'); await sleep(120);
+{ const p = await vowCentre(0); await b.click(p.x, p.y); }
+if (await waitFor('PLAYING after the vow', `G.state === 'PLAYING'`, 4000)) ok('taking the vow starts the run as ' + (await G('G.character')));
 await sleep(400);
 await shot('02-first-seconds');
 
@@ -49,6 +69,7 @@ const t0 = Date.now(); let nextShot = 5000;
 while (Date.now() - t0 < PLAY_SECONDS * 1000) {
   const st = await G('G.state');
   if (st !== lastState) { console.log(`  state -> ${st} @${((Date.now() - t0) / 1000).toFixed(1)}s`); lastState = st; }
+  if (st === 'VOWS') { const p = await vowCentre(0); await sleep(450); await b.click(p.x, p.y); await sleep(200); continue; }
   if (st === 'UPGRADE') { await b.press('Digit1'); await sleep(120); await b.click(W / 2 - 300, H / 2); continue; }
   if (st === 'GAMEOVER' || st === 'WIN') { await sleep(300); await b.press('Enter'); await b.click(W / 2, H / 2); await sleep(300); continue; }
   if (held) await b.keyUp(held);
@@ -105,7 +126,7 @@ if (await waitFor('GAMEOVER', `G.state === 'GAMEOVER'`, 30000)) {
   if (!(await G(`G.state === 'PLAYING' || G.state === 'TITLE'`))) await b.click(W / 2, H / 2);
   if (await waitFor('restart', `G.state === 'PLAYING' || G.state === 'TITLE'`, 4000)) {
     const s = JSON.parse(await snapshot());
-    if (s.state === 'TITLE') { await b.click(W / 2, H / 2); await waitFor('PLAYING after title', `G.state === 'PLAYING'`, 4000); }
+    if (s.state === 'TITLE') { await beginRun(); await waitFor('PLAYING after title', `G.state === 'PLAYING'`, 4000); }
     const s2 = JSON.parse(await snapshot());
     if (s2.hp > 0 && (s2.score === 0 || s2.score === undefined) && s2.enemies <= 20) ok('restart reset state: ' + JSON.stringify(s2)); else fail('restart did not reset cleanly: ' + JSON.stringify(s2));
     if (hi !== undefined) ok('hiScore exposed: ' + hi);

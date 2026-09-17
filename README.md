@@ -4,15 +4,16 @@
 One walled courtyard, one pump-action shotgun, ten waves, a boss, and an Encore.
 
 Two of the Order can hold that shotgun: **SISTER OPHELIA**, and **FATHER HORATIO**, a priest in a black
-cassock and a white collar. Tap the hero on the title poster (or the pill under her, or press **C**) to
-swap. It is **cosmetic only** — same gun, same stats, same waves — and the choice is remembered.
+cassock and a white collar. Starting a run from the title raises **TAKE YOUR VOWS** — two cards, one each,
+and you tap or click the one you want. It is **cosmetic only** — same gun, same stats, same waves — and the
+choice is remembered, so a retry never asks again.
 
 The shotgun kicks her backwards. **Every shot is also a dodge** — retreat and fire and you fly, charge and fire and you stall.
 
 ## Play
 
 Open `index.html` in any modern browser (double-click it — it runs straight from `file://`, no server, no build step,
-no assets). Click once to begin; the click also unlocks the audio.
+no assets). Click once to begin, then take your vows; the click also unlocks the audio.
 
 The only network call in the whole game is **THE HOLY ORDER**, the global top ten (see below). Off `file://` it is
 simply not there — the game is still the same single file with nothing to install.
@@ -28,9 +29,9 @@ simply not there — the game is still the same single file with nothing to inst
 | 1 / 2 / 3 or click | Pick a Blessing between waves |
 | Esc / P | Pause |
 | M | Mute (persisted) |
-| C, or click the hero / the pill under her | Swap between SISTER OPHELIA and FATHER HORATIO on the title screen |
+| ← → (or A / D), 1 / 2, Enter, Esc | TAKE YOUR VOWS — move the highlight, pick outright, confirm, or go back to the poster |
 | H | HARD HABIT toggle on the title screen (unlocked by winning) |
-| Enter / Space / click | Start, retry, take the Encore |
+| Enter / Space / click | Start (which raises TAKE YOUR VOWS), retry, take the Encore |
 | A–Z, 0–9, space, Backspace, Enter, Esc | Name entry on the end card — type, submit (Enter), or skip (Esc) |
 | Esc, or the TITLE pill | Leave the end card for the title poster (and the full board) |
 
@@ -52,10 +53,10 @@ real fullscreen and a landscape lock. (iOS Safari has no Fullscreen API: it gets
 | Lift the right thumb while aimed | **Fire one shell** down that line (flick to fire) |
 | Pull the right thumb back to the middle, then lift | Cancel — no shot |
 | Tap the right half | One shell down the current aim |
-| Tap the hero on the title, or the pill under her | Swap between SISTER OPHELIA and FATHER HORATIO |
+| Tap a card on TAKE YOUR VOWS | Choose SISTER OPHELIA or FATHER HORATIO and start the run — one tap, no confirm |
 | ⏸ / speaker / ⛶ buttons | Pause · Mute · Fullscreen — top right in play, top **left** on the title (THE HOLY ORDER has the right shoulder of the poster). Fullscreen is hidden where the browser has no Fullscreen API |
 | FIRE: FLICK ⇄ HOLD pill on the pause card | Switch to the old hold-to-fire trigger (persisted) |
-| Tap anywhere | Start, pick a Blessing, resume, retry, take the Encore |
+| Tap anywhere | Start (which raises the vows), pick a Blessing, resume, retry, take the Encore |
 | Tap the name field (or TAP TO TYPE) on the end card | Raises the on-screen keyboard; SUBMIT / SKIP are pills, and *done* on the keyboard submits |
 | Tap the TITLE pill on the end card | Back to the title poster, and the full board |
 
@@ -68,12 +69,21 @@ muted).
 
 ## The two of the Order
 
-The player is **SISTER OPHELIA** (default) or **FATHER HORATIO**. The poster's hero *is* the switch: tap
-or click her, or the `SISTER OPHELIA ⇄` pill under her feet, or press **C**. She changes in a puff of
-bone with a soft tick, the subtitle swaps to *He took the advice.*, and the choice is saved
-(`save.character`) and used for the next run. Both are targets of the canvas tap layer (`hero`,
-`pill:char`), so the swap is a press **and** a release on the same thing and never starts a run by
-accident.
+The player is **SISTER OPHELIA** (default) or **FATHER HORATIO**, and the choice is made on the way in.
+Start a run from the title — click, tap, Enter or Space — and the poster dims behind **TAKE YOUR VOWS**:
+a serif head under an amber rule, and two large cards side by side in the Blessing-card style (cream for
+her, amber for him). Each carries its hero drawn big, facing the middle of the screen with the shotgun in
+hand and breathing, the name, and the line: *She took the advice.* / *He took the advice.* They fly in on
+the Blessing cards' own 400 ms entrance and answer nothing until it lands, and the character you chose
+last starts highlighted.
+
+Taking a vow is one tap (`vow:nun` / `vow:priest` in the canvas tap layer, so it is a press **and** a
+release on the same card, and a finger held across the transition is dead): she goes up in a puff of
+bone with a soft tick, the choice is saved (`save.character`), and the run starts on the same gesture —
+which is also the gesture that asks for fullscreen on a phone. On a keyboard, ← → (or A / D) move the
+highlight, `1` / `2` pick outright, Enter confirms and Esc goes back to the poster. **A retry never comes
+through here**: TAP TO RETRY keeps whoever just died. The TITLE pill goes back to the poster, and the next
+start asks again. The poster's hero is now only a portrait of the last vow taken.
 
 The priest is drawn by the same procedural recipe as the nun, at the same pivot, in the same tones: black
 cassock with her bell silhouette, a **white clerical collar with a dark notch** where she has her white
@@ -154,7 +164,9 @@ For the leaderboard: `leaderboard` (`{available, status, top, lastError}`), `lea
 `keyboard` (`{up, entryUp, rect, layoutH, layout}`), `debugKeyboardRect(h)` to fake a shrunken visual viewport, and
 `forceGameOver(score, wave)` to land straight on an end card with a chosen score. For the characters:
 `character` (get/set: `'nun'` | `'priest'`), `characters`, `characterInfo` (`{id, c, name, title, subtitle,
-run, hero, pill}` — the last two are the title poster's tap targets in arena px) and `swapCharacter()`.
+run, hero}` — `hero` is the poster portrait's box in arena px) and `swapCharacter()`. For TAKE YOUR VOWS:
+`vowsHighlight` (the lit card's index), `vowsReady` (is the entrance over) and `vowCards`
+(`[{id, name, rect}]`, arena px).
 
 ## Tests
 
@@ -168,8 +180,7 @@ node tools/lb-smoke.mjs                       # THE HOLY ORDER -> "ALL LEADERBOA
 node tools/lb-smoke.mjs --live                # ...and the same, plus a real round trip to `scores_test`
 ```
 
-The smoke test loads the page, plays it through real input, forces the card screen, stress-tests 80 enemies, dies, retries, and reloads to check the high score survived. The touch test runs an 844×390 phone viewport with CDP touch emulation: it checks the canvas fills the glass and the arena is letterboxed inside it, drives a move stick planted on a letterbox bar, flicks to fire (and cancels), taps to fire, checks the aim assist snaps onto a body 6° off the drag, runs the hold-mode trigger, uses the screen-space buttons and the pause-card FIRE pill (which must survive a reload), checks that tapping the title hero swaps to FATHER HORATIO (subtitle and all) without starting a run and
-that the pill swaps back, and checks the portrait rotate prompt. The leaderboard test serves `index.html` from a throwaway localhost server (the board only exists over http(s)) and
+The smoke test loads the page, plays it through real input, forces the card screen, stress-tests 80 enemies, dies, retries, and reloads to check the high score survived. The touch test runs an 844×390 phone viewport with CDP touch emulation: it checks the canvas fills the glass and the arena is letterboxed inside it, drives a move stick planted on a letterbox bar, flicks to fire (and cancels), taps to fire, checks the aim assist snaps onto a body 6° off the drag, runs the hold-mode trigger, uses the screen-space buttons and the pause-card FIRE pill (which must survive a reload), walks the whole TAKE YOUR VOWS path (a tap to begin raises it, a tap during the entrance does nothing, a tap on the priest card starts the run as FATHER HORATIO, a retry goes straight back into play still as him, and the TITLE pill → poster → tap raises the vows again with his card lit, Esc backing out), and checks the portrait rotate prompt. The leaderboard test serves `index.html` from a throwaway localhost server (the board only exists over http(s)) and
 installs a `fetch` mock that answers `:runQuery` with a canned top ten, `:runAggregationQuery` with a canned count of 36,
 and records every submit. It checks the title panel, the name rules against the server regex, desktop typing (letters,
 digits, one interior space, backspace, the twelve-character ceiling), the phone path — the hidden `<input>` really does

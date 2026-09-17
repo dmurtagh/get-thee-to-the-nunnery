@@ -3,7 +3,8 @@
 // Phone-landscape viewport + CDP touch emulation. Checks the full-viewport canvas, the floating
 // sticks over the letterbox bars, FLICK-to-fire (drag, release, cancel), tap-to-fire, aim assist,
 // HOLD mode, the screen-space buttons, the pause-screen FIRE pill (and that it survives a reload),
-// and the portrait ROTATE prompt. Fails loudly on any console error.
+// the TAKE YOUR VOWS character card on the way into a run, and the portrait ROTATE prompt.
+// Fails loudly on any console error.
 import { launch, sleep } from './cdp.mjs';
 import { resolve } from 'node:path';
 import { mkdirSync } from 'node:fs';
@@ -49,39 +50,90 @@ if (await G('G.touchMode')) ok('a coarse pointer boots straight into touchMode (
 else fail('touchMode off on a phone viewport: the title would show the WASD hint');
 await shot('touch2-title');
 
-console.log('== the title hero swaps the character, and never starts the run');
+const mid = { x: W / 2, y: H / 2 };
+const vowCentre = async (i) => { const r = (await J('G.vowCards'))[i].rect; return L(r.x + r.w / 2, r.y + r.h / 2); };
+// title -> TAKE YOUR VOWS -> a card. Used wherever a run has to be started from the poster.
+async function beginRun(id = 90) {
+  await b.tap(mid.x, mid.y, 60, id);
+  await sleep(560);                                   // past the 400 ms card entrance
+  if (await G(`G.state === 'VOWS'`)) { const c = await vowCentre(0); await b.tap(c.x, c.y, 60, id + 1); await sleep(260); }
+}
+
+console.log('== TAKE YOUR VOWS: the choice is a card on the way in, not a toggle on the poster');
 {
   const before = await J('G.characterInfo');
   if (before.id === 'nun' && before.subtitle === 'She took the advice.') ok('the poster opens as SISTER OPHELIA: "' + before.subtitle + '"');
   else fail('the title did not open on the nun: ' + JSON.stringify(before));
-  const hc = L(before.hero.x + before.hero.w / 2, before.hero.y + before.hero.h / 2);
-  await b.tap(hc.x, hc.y, 70, 40);
-  await sleep(300);
-  const after = await J('G.characterInfo');
-  if ((await G('G.character')) === 'priest') ok('a tap on the hero made him FATHER HORATIO');
-  else fail('the hero tap did not swap: ' + (await G('G.character')));
-  if (after.subtitle === 'He took the advice.' && after.subtitle !== before.subtitle) ok('the subtitle swapped live: "' + after.subtitle + '"');
-  else fail('the subtitle did not change: ' + JSON.stringify(after.subtitle));
-  if (after.name === 'FATHER HORATIO') ok('the pill reads FATHER HORATIO'); else fail('the pill says ' + after.name);
-  if (await G(`G.state === 'TITLE'`)) ok('...and the tap did NOT start a run'); else fail('the hero tap started the run: ' + (await G('G.state')));
-  await shot('touch2-title-priest');
-  // the pill under him toggles the same way, and puts her back
-  const pill = after.pill, pc = L(pill.x + pill.w / 2, pill.y + pill.h / 2);
-  await b.tap(pc.x, pc.y, 70, 41);
-  await sleep(300);
-  const back = await J('G.characterInfo');
-  if (back.id === 'nun' && back.subtitle === 'She took the advice.') ok('a tap on the pill put SISTER OPHELIA back');
-  else fail('the pill did not swap back: ' + JSON.stringify(back));
-  if (await G(`G.state === 'TITLE'`)) ok('...and the pill did not start a run either'); else fail('the pill tap started the run');
-  // the pill must not sit under the screen-space buttons, whichever corner they are in
+  await b.tap(mid.x, mid.y, 70, 40);
+  await sleep(140);
+  if (await G(`G.state === 'VOWS'`)) ok('a tap to begin raises TAKE YOUR VOWS instead of starting the run');
+  else fail('the tap did not raise the vows: ' + (await G('G.state')));
+  if ((await G('G.vowsHighlight')) === 0) ok('the character last chosen (the nun) is the lit card');
+  else fail('the wrong card is highlighted: ' + (await G('G.vowsHighlight')));
+  // the entrance owns the screen: a fresh tap mid-flight must choose nothing
+  const cN = await vowCentre(0);
+  await b.tap(cN.x, cN.y, 40, 41);
+  await sleep(150);
+  if (await G(`G.state === 'VOWS'`)) ok('a tap during the entrance does nothing');
+  else fail('the entrance answered a tap: ' + (await G('G.state')));
+  await sleep(500);
+  if (await G('G.vowsReady')) ok('the entrance is over inside 500 ms'); else fail('the vows never armed');
+  await shot('touch2-vows');
+  // geometry: two cards, clear of the header, of each other, and of the arena's edges
+  const cards = await J('G.vowCards');
+  const [a, z] = cards.map((x) => x.rect);
+  if (cards.length === 2 && a.y >= 100) ok(`both cards clear the header: top edge y ${a.y}`); else fail('a card overlaps the header: ' + JSON.stringify(cards));
+  if (z.x >= a.x + a.w + 24) ok(`the cards are ${z.x - (a.x + a.w)} px apart`); else fail('the cards overlap: ' + JSON.stringify([a, z]));
+  if (a.x >= 12 && z.x + z.w <= 960 - 12 && a.y + a.h <= 540 - 12) ok('nothing runs off the poster: ' + JSON.stringify([a, z]));
+  else fail('a card touches the edge of the screen: ' + JSON.stringify([a, z]));
   const btns = await J('G.touchButtons.map((x) => ({ id: x.id, L: G.toLogical(x.x, x.y) }))');
-  const near = btns.filter((x) => x.L.x > back.pill.x - 30 && x.L.x < back.pill.x + back.pill.w + 30 && x.L.y > back.pill.y - 30 && x.L.y < back.pill.y + back.pill.h + 30);
-  if (!near.length) ok('the touch buttons keep clear of the character pill: ' + btns.map((x) => x.id + '@' + Math.round(x.L.x) + ',' + Math.round(x.L.y)).join(' '));
-  else fail('a button sits on the character pill: ' + JSON.stringify(near));
-  if (back.pill.y + back.pill.h <= 540 - 4 && back.pill.x + back.pill.w <= 960 - 4) ok('the pill fits the poster: ' + JSON.stringify(back.pill));
-  else fail('the pill runs off the poster: ' + JSON.stringify(back.pill));
+  const clash = btns.filter((x) => cards.some((cd) => x.L.x > cd.rect.x - 30 && x.L.x < cd.rect.x + cd.rect.w + 30 && x.L.y > cd.rect.y - 30 && x.L.y < cd.rect.y + cd.rect.h + 30));
+  if (!clash.length) ok('the touch buttons keep clear of both cards: ' + btns.map((x) => x.id + '@' + Math.round(x.L.x) + ',' + Math.round(x.L.y)).join(' '));
+  else fail('a button sits on a vow card: ' + JSON.stringify(clash));
+  // one tap is enough here: there is no stick under a thumb on the title
+  const cP = await vowCentre(1);
+  await b.tap(cP.x, cP.y, 50, 42);
+  await sleep(420);
+  if (await G(`G.state === 'PLAYING'`)) ok('a single tap on FATHER HORATIO takes the vow and starts the run');
+  else fail('the priest card did not start the run: ' + (await G('G.state')));
+  if ((await G('G.character')) === 'priest') ok('...and the run is his'); else fail('wrong character: ' + (await G('G.character')));
+  if ((await J('G.characterInfo')).subtitle === 'He took the advice.') ok('the poster subtitle follows him: "He took the advice."');
+  else fail('the subtitle did not follow: ' + JSON.stringify((await J('G.characterInfo')).subtitle));
 }
-checkErrors('character select');
+checkErrors('take your vows');
+
+console.log('== a retry keeps whoever just died: no vows on the way back in');
+{
+  await G('G.forceGameOver(0, 1)');
+  await waitFor('GAMEOVER', `G.state === 'GAMEOVER'`, 4000);
+  await sleep(420);
+  await b.tap(mid.x, mid.y, 60, 43);
+  await sleep(420);
+  if (await G(`G.state === 'PLAYING'`)) ok('a retry tap goes straight into play, no vows card');
+  else fail('the retry did not go straight in: ' + (await G('G.state')));
+  if ((await G('G.character')) === 'priest') ok('...still FATHER HORATIO'); else fail('the retry changed the character: ' + (await G('G.character')));
+}
+
+console.log('== the TITLE pill goes back to the poster, and the next start asks again');
+{
+  await G('G.forceGameOver(0, 1)');
+  await waitFor('GAMEOVER', `G.state === 'GAMEOVER'`, 4000);
+  await sleep(420);
+  const tp = (await J('G.endCard')).titlePill;
+  const p = L(tp.x + tp.w / 2, tp.y + tp.h / 2);
+  await b.tap(p.x, p.y, 60, 44);
+  await sleep(420);
+  if (await G(`G.state === 'TITLE'`)) ok('the TITLE pill went back to the poster'); else fail('the TITLE pill did nothing: ' + (await G('G.state')));
+  await b.tap(mid.x, mid.y, 60, 45);
+  await sleep(620);
+  if (await G(`G.state === 'VOWS'`)) ok('...and the next start raises the vows again'); else fail('no vows from the title: ' + (await G('G.state')));
+  if ((await G('G.vowsHighlight')) === 1) ok('the priest card is the lit one now'); else fail('the vows forgot the priest: ' + (await G('G.vowsHighlight')));
+  await shot('touch2-vows-priest');
+  await b.press('Escape');
+  await sleep(320);
+  if (await G(`G.state === 'TITLE'`)) ok('Esc backs out of the vows to the poster'); else fail('Esc did not leave the vows: ' + (await G('G.state')));
+}
+checkErrors('vows, retry and back')
 
 console.log('== the canvas fills the viewport, the arena is letterboxed INSIDE it');
 const rect = await J(`(() => { const r = document.getElementById('c').getBoundingClientRect(); return { x: r.x, y: r.y, w: Math.round(r.width), h: Math.round(r.height) }; })()`);
@@ -111,9 +163,8 @@ console.log('== the fullscreen button');
 }
 
 console.log('== tap to begin');
-const mid = { x: W / 2, y: H / 2 };
-await b.tap(mid.x, mid.y);
-if (await waitFor('PLAYING after tap', `G.state === 'PLAYING'`, 4000)) ok('a tap starts the run');
+await beginRun(46);
+if (await waitFor('PLAYING after tap', `G.state === 'PLAYING'`, 4000)) ok('a tap, then a vow, starts the run');
 if (await G('G.touchMode === true')) ok('touchMode latched by the first touch'); else fail('GAME.touchMode did not become true');
 if ((await G('G.touchFireMode')) === 'flick') ok('flick is the default fire mode'); else fail('default fire mode is ' + (await G('G.touchFireMode')));
 await G('G.setGod(true)');   // the checks below are about input, not survival
@@ -420,7 +471,7 @@ else fail('fire mode lost on reload: ' + (await G('G.touchFireMode')));
 checkErrors('reload');
 
 console.log('== portrait: the rotate prompt');
-await b.tap(mid.x, mid.y);
+await beginRun(80);
 await waitFor('PLAYING', `G.state === 'PLAYING'`, 4000);
 await G('G.setGod(true)');
 await G(`G.spawn('restless', 6)`);
