@@ -1,6 +1,6 @@
 # GET THEE TO A NUNNERY
 
-*She took the advice.* Ophelia went to the nunnery; the restless dead of Elsinore followed her there.
+*Hamlet told her where to go.* Ophelia went to the nunnery; the restless dead of Elsinore followed her there.
 One walled courtyard, one pump-action shotgun, ten waves, a boss, and an Encore.
 
 Two of the Order can hold that shotgun: **SISTER OPHELIA**, and **FATHER HORATIO**, a priest in a black
@@ -73,7 +73,10 @@ The player is **SISTER OPHELIA** (default) or **FATHER HORATIO**, and the choice
 Start a run from the title — click, tap, Enter or Space — and the poster dims behind **TAKE YOUR VOWS**:
 a serif head under an amber rule, and two large cards side by side in the Blessing-card style (cream for
 her, amber for him). Each carries its hero drawn big, facing the middle of the screen with the shotgun in
-hand and breathing, the name, and the line: *She took the advice.* / *He took the advice.* They fly in on
+hand and breathing, the name, and a line of her own — one of four for the nun, one of five for the priest
+(*She prays. She sprays.*, *Last rites, first shot.*), rolled fresh every time the screen opens and never
+the same line twice running for that card; a long one wraps to two, and the block lifts to keep its
+margins. They fly in on
 the Blessing cards' own 400 ms entrance and answer nothing until it lands, and the character you chose
 last starts highlighted.
 
@@ -92,7 +95,7 @@ trail behind him. He is pre-rendered the same way (both frames plus a white silh
 as a priest at 1x in a crowd (`tools/shots/char-1x.png` puts the two side by side on the flagstones).
 
 Nothing about him is a stat: the gun, the recoil, the hearts and the Blessings are identical. What
-changes is flavour — the subtitle, and two of the six game-over quotes (*Goodnight, sweet nun.* becomes
+changes is flavour — his vow-card taglines, and two of the six game-over quotes (*Goodnight, sweet nun.* becomes
 *Goodnight, padre.*; *Alas, poor Ophelia.* becomes *Alas, poor Horatio.*). The score you post carries a
 quiet `c` flag saying which of them played it; the board still shows the name you typed and nothing else.
 
@@ -164,9 +167,10 @@ For the leaderboard: `leaderboard` (`{available, status, top, lastError}`), `lea
 `keyboard` (`{up, entryUp, rect, layoutH, layout}`), `debugKeyboardRect(h)` to fake a shrunken visual viewport, and
 `forceGameOver(score, wave)` to land straight on an end card with a chosen score. For the characters:
 `character` (get/set: `'nun'` | `'priest'`), `characters`, `characterInfo` (`{id, c, name, title, subtitle,
-run, hero}` — `hero` is the poster portrait's box in arena px) and `swapCharacter()`. For TAKE YOUR VOWS:
-`vowsHighlight` (the lit card's index), `vowsReady` (is the entrance over) and `vowCards`
-(`[{id, name, rect}]`, arena px).
+run, hero}` — `subtitle` is the poster's fixed line, `hero` its portrait's box in arena px) and `swapCharacter()`. For TAKE YOUR VOWS:
+`vowsHighlight` (the lit card's index), `vowsReady` (is the entrance over), `vowCards`
+(`[{id, name, rect, tagline}]`, arena px), `vowTaglines` (`{nun, priest}` — the lines the cards are
+showing), `vowTaglineLists` (every line on each list) and `vowTag` (get/set the chosen indices).
 
 ## Tests
 

@@ -62,7 +62,7 @@ async function beginRun(id = 90) {
 console.log('== TAKE YOUR VOWS: the choice is a card on the way in, not a toggle on the poster');
 {
   const before = await J('G.characterInfo');
-  if (before.id === 'nun' && before.subtitle === 'She took the advice.') ok('the poster opens as SISTER OPHELIA: "' + before.subtitle + '"');
+  if (before.id === 'nun' && before.subtitle === 'Hamlet told her where to go.') ok('the poster opens as SISTER OPHELIA under "' + before.subtitle + '"');
   else fail('the title did not open on the nun: ' + JSON.stringify(before));
   await b.tap(mid.x, mid.y, 70, 40);
   await sleep(140);
@@ -97,8 +97,8 @@ console.log('== TAKE YOUR VOWS: the choice is a card on the way in, not a toggle
   if (await G(`G.state === 'PLAYING'`)) ok('a single tap on FATHER HORATIO takes the vow and starts the run');
   else fail('the priest card did not start the run: ' + (await G('G.state')));
   if ((await G('G.character')) === 'priest') ok('...and the run is his'); else fail('wrong character: ' + (await G('G.character')));
-  if ((await J('G.characterInfo')).subtitle === 'He took the advice.') ok('the poster subtitle follows him: "He took the advice."');
-  else fail('the subtitle did not follow: ' + JSON.stringify((await J('G.characterInfo')).subtitle));
+  if ((await J('G.characterInfo')).subtitle === 'Hamlet told her where to go.') ok('the poster subtitle is the game\'s line, not his: "Hamlet told her where to go."');
+  else fail('the poster subtitle changed with the character: ' + JSON.stringify((await J('G.characterInfo')).subtitle));
 }
 checkErrors('take your vows');
 
@@ -134,6 +134,32 @@ console.log('== the TITLE pill goes back to the poster, and the next start asks 
   if (await G(`G.state === 'TITLE'`)) ok('Esc backs out of the vows to the poster'); else fail('Esc did not leave the vows: ' + (await G('G.state')));
 }
 checkErrors('vows, retry and back')
+
+console.log('== each card takes a fresh line every time the vows come up, never the same one twice running');
+{
+  const lists = await J('G.vowTaglineLists');
+  const seen = [];
+  for (let n = 0; n < 6; n++) {
+    await b.tap(mid.x, mid.y, 60, 50 + n);
+    await sleep(620);
+    if (!(await G(`G.state === 'VOWS'`))) { fail(`opening ${n + 1}: the vows never came up (${await G('G.state')})`); break; }
+    const tags = await J('G.vowTaglines');
+    for (const id of ['nun', 'priest']) {
+      if (lists[id].indexOf(tags[id]) < 0) fail(`opening ${n + 1}: ${id} is showing a line that is not on its list: "${tags[id]}"`);
+      if (seen.length && seen[seen.length - 1][id] === tags[id]) fail(`opening ${n + 1}: ${id} repeated its last line "${tags[id]}"`);
+    }
+    seen.push(tags);
+    if (n === 0) await shot('touch2-vows-taglines');
+    await b.press('Escape');
+    await sleep(300);
+  }
+  if (seen.length === 6) ok('six openings, both cards on their own list and never twice running');
+  const uniq = (id) => new Set(seen.map((t) => t[id])).size;
+  if (uniq('nun') > 1 && uniq('priest') > 1) ok(`the lines really do rotate (${uniq('nun')} nun / ${uniq('priest')} priest across six openings)`);
+  else fail('a card showed the same line for all six openings');
+  if (await G(`G.state === 'TITLE'`)) ok('...and Esc left us back on the poster'); else fail('not back on the poster: ' + (await G('G.state')));
+}
+checkErrors('vow taglines');
 
 console.log('== the canvas fills the viewport, the arena is letterboxed INSIDE it');
 const rect = await J(`(() => { const r = document.getElementById('c').getBoundingClientRect(); return { x: r.x, y: r.y, w: Math.round(r.width), h: Math.round(r.height) }; })()`);

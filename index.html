@@ -195,15 +195,54 @@ const VERSION = '1.0.0-m8';
 
 // ---------------------------------------------------------------- THE TWO OF THE ORDER
 // Two playable characters, and the difference is COSMETIC: the same gun, the same stats, the same
-// numbers the sim reads. A character owns its sprite key, the poster subtitle, the title the board
-// puts in front of a name, and the handful of game-over quotes that name a nun out loud.
+// numbers the sim reads. A character owns its sprite key, the title the board puts in front of a
+// name, and the handful of game-over quotes that name a nun out loud.
+// The poster's own line. One constant: the subtitle under GET THEE TO A NUNNERY never changes, whoever
+// is holding the shotgun - the characters have their own lines, and those live on the vow cards.
+const TAGLINE = 'Hamlet told her where to go.';
 const CHARACTERS = [
-  { id: 'nun', c: 0, name: 'SISTER OPHELIA', title: 'SISTER', pronounSub: 'She took the advice.', quotes: {} },
+  { id: 'nun', c: 0, name: 'SISTER OPHELIA', title: 'SISTER', quotes: {} },
   {
-    id: 'priest', c: 1, name: 'FATHER HORATIO', title: 'FATHER', pronounSub: 'He took the advice.',
+    id: 'priest', c: 1, name: 'FATHER HORATIO', title: 'FATHER',
     quotes: { 'Goodnight, sweet nun.': 'Goodnight, padre.', 'Alas, poor Ophelia.': 'Alas, poor Horatio.' },
   },
 ];
+// One line per card on TAKE YOUR VOWS, rolled fresh every time the screen opens.
+const TAGLINES = {
+  nun: [
+    'Took the vows. Kept the grudge.',
+    'She prays. She sprays.',
+    'Get thee to a nunnery? Done.',
+    'Frailty, thy name is buckshot.',
+  ],
+  priest: [
+    'Big fan of Old Testament vengeance.',
+    'Exorcises demons, one shell at a time.',
+    'Officiates shotgun weddings. Literally.',
+    'Turns the other cheek. Then fires.',
+    'Last rites, first shot.',
+  ],
+};
+// The last index each card showed, kept OUTSIDE G: a run rebuilds G, and the no-repeat rule is for
+// the whole session. A roll never lands on the line that card is already remembered by.
+const VOW_TAG_PREV = {};
+function rollVowTags() {
+  const out = {};
+  for (const d of CHARACTERS) {
+    const list = TAGLINES[d.id];
+    if (!list || !list.length) { out[d.id] = 0; continue; }
+    let i = randi(list.length);
+    if (list.length > 1) while (i === VOW_TAG_PREV[d.id]) i = randi(list.length);
+    VOW_TAG_PREV[d.id] = i; out[d.id] = i;
+  }
+  return out;
+}
+function vowTagline(id) {
+  const list = TAGLINES[id];
+  if (!list || !list.length) return '';
+  const tag = (G && G.vowTag) || VOW_TAG_PREV;
+  return list[clamp(tag[id] | 0, 0, list.length - 1)];
+}
 const CHAR_DEF = {};
 for (const d of CHARACTERS) CHAR_DEF[d.id] = d;
 function charDef(id) { return CHAR_DEF[id] || CHARACTERS[0]; }
@@ -2886,8 +2925,12 @@ function drawVows(c) {
     const ang = inward > 0 ? CONFIG.VOW_HERO_ANG : Math.PI - CONFIG.VOW_HERO_ANG;
     const bob = Math.sin(t * 2 + i * 1.3) * 2.5;
     drawCharacterWithGun(d.id, c, cx - inward * CONFIG.VOW_HERO_DX, r.y + CONFIG.VOW_HERO_FEET + bob, CONFIG.VOW_HERO_S, ang, 0.2);
-    uiText(c, d.name, cx, r.y + 258, FSANS(19), sel ? PAL.cream : rgba(PAL.cream, 0.82), 'center', { spacing: 2, shadow: 2 });
-    uiText(c, d.pronounSub, cx, r.y + 287, FSERIF(18, true), rgba(PAL.amber, sel ? 1 : 0.75), 'center', { shadow: 2 });
+    // the name and her line are one block: a tagline that wraps lifts the pair half a line, so two
+    // lines keep the same margins off the hero's feet above and the card's bottom edge below
+    const tf = FSERIF(18, true), tl = uiWrap(c, vowTagline(d.id), tf, r.w - 30), lift = (tl.length - 1) * 12;
+    uiText(c, d.name, cx, r.y + 258 - lift, FSANS(19), sel ? PAL.cream : rgba(PAL.cream, 0.82), 'center', { spacing: 2, shadow: 2 });
+    for (let j = 0; j < tl.length; j++)
+      uiText(c, tl[j], cx, r.y + 287 - lift + j * 20, tf, rgba(PAL.amber, sel ? 1 : 0.75), 'center', { shadow: 2 });
     if (!Touch.on) keycap(c, cx - 11, r.y + r.h + 16, String(i + 1));
     c.restore();
   }
@@ -3003,6 +3046,7 @@ function newGame() {
     bankedKills: 0, bankedRun: false,
     picks: {}, cards: [], cardHover: -1, cardSel: -1, cardT: 0, cardShowT: -1e9, newUnlocks: [], hard: false,
     vowSel: Math.max(0, CHARACTERS.indexOf(charDef(charId()))), vowShowT: -1e9,   // TAKE YOUR VOWS
+    vowTag: null,   // {nun: i, priest: j} - the lines the cards are showing, rolled on the way in
     character: charId(),   // whoever took the vow: the run keeps its own copy
   };
 }
@@ -3703,7 +3747,7 @@ STATES.TITLE = {
     uiText(c, 'GET THEE TO', 72, 150, FSERIF(56), PAL.cream, 'left', { shadow: 3, spacing: 1 });
     uiText(c, 'A NUNNERY', 68, 244, FSERIF(86), PAL.cream, 'left', { shadow: 4 });   // 98 -> 86: the board needs the right shoulder
     rule(c, 72, 262, 380);
-    uiText(c, charDef(charId()).pronounSub, 74, 302, FSERIF(28, true), PAL.amber, 'left', { shadow: 2 });
+    uiText(c, TAGLINE, 74, 302, FSERIF(28, true), PAL.amber, 'left', { shadow: 2 });
     const hint = Touch.on ? 'LEFT THUMB MOVE   ·   RIGHT THUMB DRAG TO AIM, RELEASE TO FIRE   ·   TAP TO BEGIN' : 'WASD MOVE   ·   MOUSE AIM   ·   CLICK TO BEGIN';
     uiText(c, hint, 74, 350, FSANS(13), rgba(PAL.cream, pulse(t, 0.7, 0.5, 1)), 'left', { spacing: 2, shadow: 1 });
     // a home-screen web app opens with no audio session at all: one tap is all it takes
@@ -3739,6 +3783,7 @@ STATES.VOWS = {
   enter() {
     Input.endTick();
     G.vowSel = Math.max(0, CHARACTERS.indexOf(charDef(charId())));   // the last vow is the one lit
+    G.vowTag = rollVowTags();                                        // ...and both cards get a new line
     G.vowShowT = RT;
   },
   update(dt) {
@@ -4108,13 +4153,18 @@ const GAME = {
   get characters() { return CHARACTERS.map((d) => ({ id: d.id, c: d.c, name: d.name, title: d.title })); },
   get characterInfo() {
     const d = charDef(charId());
-    return { id: d.id, c: d.c, name: d.name, title: d.title, subtitle: d.pronounSub, run: runCharId(), hero: heroRect() };
+    return { id: d.id, c: d.c, name: d.name, title: d.title, subtitle: TAGLINE, run: runCharId(), hero: heroRect() };
   },
   swapCharacter() { return swapCharacter(); },
   // ---- TAKE YOUR VOWS (arena px). `vowsHighlight` is the card the keyboard/last choice is on.
   get vowsHighlight() { return G ? G.vowSel : -1; },
   get vowsReady() { return G.state === 'VOWS' ? vowsReady() : false; },
-  get vowCards() { return CHARACTERS.map((d, i) => ({ id: d.id, name: d.name, rect: vowRect(i) })); },
+  get vowCards() { return CHARACTERS.map((d, i) => ({ id: d.id, name: d.name, rect: vowRect(i), tagline: vowTagline(d.id) })); },
+  get vowTaglines() { const o = {}; for (const d of CHARACTERS) o[d.id] = vowTagline(d.id); return o; },
+  get vowTaglineLists() { const o = {}; for (const d of CHARACTERS) o[d.id] = (TAGLINES[d.id] || []).slice(); return o; },
+  // debug only: pin the lines the cards show, so a shot can be taken of the longest one
+  get vowTag() { return G && G.vowTag ? Object.assign({}, G.vowTag) : Object.assign({}, VOW_TAG_PREV); },
+  set vowTag(v) { if (!v || !G) return; G.vowTag = Object.assign({}, G.vowTag, v); Object.assign(VOW_TAG_PREV, G.vowTag); },
   get nameEntry() { const e = G.entry; return { active: e.active, done: e.done, sent: e.sent, pending: e.pending, name: e.name, len: e.name.length, msg: e.msg, rank: e.rank, sentName: e.sentName }; },
   get entryUI() { const L = entryLayout(); return { field: L.field, submit: L.submit, skip: L.skip, hintY: L.hintY }; },   // arena px
   get playerName() { return Save.data.playerName; },
