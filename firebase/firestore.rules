@@ -6,14 +6,15 @@ service cloud.firestore {
       // col is 'scores' (live) or 'scores_test' (harness); identical validation.
       allow read: if col in ['scores', 'scores_test'];
       allow create: if col in ['scores', 'scores_test']
-        && request.resource.data.keys().hasOnly(['name', 'score', 'wave', 'v'])
+        && request.resource.data.keys().hasOnly(['name', 'score', 'wave', 'v', 'c'])
         && request.resource.data.name is string
         && request.resource.data.name.matches('^[A-Z0-9][A-Z0-9 ]{0,11}$')
         && request.resource.data.score is int
         && request.resource.data.score >= 0 && request.resource.data.score <= 2000000
         && request.resource.data.wave is int
         && request.resource.data.wave >= 1 && request.resource.data.wave <= 200
-        && request.resource.data.v is int;
+        && request.resource.data.v is int
+        && (!('c' in request.resource.data) || (request.resource.data.c is int && request.resource.data.c >= 0 && request.resource.data.c <= 1));
       allow update, delete: if false;
     }
   }
