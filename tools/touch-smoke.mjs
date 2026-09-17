@@ -247,6 +247,136 @@ console.log('== pause button, the FIRE pill, and the mute button');
 }
 checkErrors('touch UI');
 
+// ---------------------------------------------------------------------------------------------
+// The Blessing card screen. The bug this guards: the wave ends under two planted thumbs, the card
+// screen arrives, and the thumb (or its release) is read as a pick. Nothing held across a state
+// change may ever choose anything, a tap is a press AND a release on the same card, the cards are
+// dead while they fly in, and on a phone the first tap only SELECTS.
+// ---------------------------------------------------------------------------------------------
+console.log('== the card screen: the entrance, and the thumb that must not pick for you');
+await readViewport();
+const cardCentre = async (i) => { const r = (await J('G.cardRects'))[i]; return L(r.x + r.w / 2, r.y + r.h / 2); };
+const freshCards = async (keepIntro) => {
+  await G('G.startRun()'); await sleep(220); await G('G.setGod(true)');
+  await G(keepIntro ? 'G.forceCardsReal()' : 'G.forceCards()');
+  return waitFor('UPGRADE', `G.state === 'UPGRADE'`, 4000);
+};
+
+// (a) a thumb planted for the whole transition, lifted over a card
+{
+  await G('G.startRun()'); await sleep(220); await G('G.setGod(true)');
+  await b.touch([{ x: 660, y: 300, id: 20 }], 'touchStart');     // the aim thumb, mid-wave
+  await sleep(140);
+  if (await G('G.sticks.aim')) ok('the aim thumb is planted before the wave ends'); else fail('no aim stick to hold');
+  await G('G.forceCardsReal()');                                 // ...and the wave ends under it
+  await waitFor('UPGRADE', `G.state === 'UPGRADE'`, 4000);
+  const u = await J('G.ui');
+  if (u.stale >= 1) ok(`(a) the held thumb is STALE on the new screen (${u.stale} pointer)`);
+  else fail('(a) nothing went stale across the transition: ' + JSON.stringify(u));
+  if (!(await G('G.sticks.aim'))) ok('(a) ...and both sticks were dropped leaving play');
+  else fail('(a) a stick survived into UPGRADE');
+  const c1 = await cardCentre(1);
+  await sleep(600);                                              // long past the entrance
+  await b.touch([{ x: c1.x, y: c1.y, id: 20 }], 'touchMove');    // drag it onto a Blessing
+  await sleep(90);
+  await b.touch([], 'touchEnd');                                 // and let go right on the card
+  await sleep(260);
+  const st = await J('({state: G.state, sel: G.cardSelection, picks: Object.keys(G.picks).length})');
+  if (st.state === 'UPGRADE' && st.sel === -1 && st.picks === 0) ok('(a) the held thumb chose NOTHING: ' + JSON.stringify(st));
+  else fail('(a) a thumb held across the wave end picked a Blessing: ' + JSON.stringify(st));
+}
+
+// the entrance, caught mid-flight (staggered scale/slide/fade)
+{
+  await freshCards(true);
+  await sleep(170);
+  await shot('cards-intro');
+}
+
+// (b) dead during the entrance; then tap to select, tap again to confirm
+{
+  await freshCards(true);
+  if (!(await G('G.cardsReady'))) ok('(b) the cards are not interactive while they fly in');
+  else fail('(b) the entrance was over before it began');
+  const c0 = await cardCentre(0);
+  await b.tap(c0.x, c0.y, 40, 21);                               // a FRESH tap, mid-entrance
+  await sleep(140);
+  const midT = await J('({state: G.state, sel: G.cardSelection})');
+  if (midT.state === 'UPGRADE' && midT.sel === -1) ok('(b) a tap during the entrance does nothing');
+  else fail('(b) the entrance answered a tap: ' + JSON.stringify(midT));
+  await sleep(500);
+  if (await G('G.cardsReady')) ok('(b) the entrance is over inside 500 ms'); else fail('(b) still not armed after 500 ms');
+  await b.tap(c0.x, c0.y, 50, 22);                               // first tap: SELECT
+  await sleep(220);
+  const sel = await J('({state: G.state, sel: G.cardSelection, pill: G.chooseRect, picks: Object.keys(G.picks).length})');
+  if (sel.state === 'UPGRADE' && sel.sel === 0 && sel.picks === 0) ok('(b) the first tap SELECTS, it does not buy');
+  else fail('(b) the first tap was taken as a pick: ' + JSON.stringify(sel));
+  if (sel.pill && sel.pill.h * vp.scale >= 48) ok(`(b) the CHOOSE pill is ${Math.round(sel.pill.h * vp.scale)} css px tall (>= 48)`);
+  else fail('(b) the CHOOSE pill is missing or too small: ' + JSON.stringify(sel.pill));
+  await shot('cards-selected');
+  const want = (await J('G.cards'))[0];
+  await b.tap(c0.x, c0.y, 50, 23);                               // second tap on the same card: CONFIRM
+  await sleep(320);
+  const done = await J('({state: G.state, picks: G.picks})');
+  if (done.state !== 'UPGRADE' && done.picks[want] === 1) ok(`(b) the second tap took ${want} and left the card screen`);
+  else fail('(b) the second tap did not confirm: ' + JSON.stringify(done));
+}
+
+// (c) the selection moves to whichever card you tap, and CHOOSE commits it
+{
+  await freshCards(false);
+  const cA = await cardCentre(0), cB = await cardCentre(2);
+  await b.tap(cA.x, cA.y, 50, 24); await sleep(200);
+  if ((await G('G.cardSelection')) === 0) ok('(c) card A selected'); else fail('(c) card A did not select: ' + (await G('G.cardSelection')));
+  await b.tap(cB.x, cB.y, 50, 25); await sleep(200);
+  const moved = await J('({state: G.state, sel: G.cardSelection})');
+  if (moved.sel === 2 && moved.state === 'UPGRADE') ok('(c) tapping card B moved the selection, and bought nothing');
+  else fail('(c) the selection did not move cleanly: ' + JSON.stringify(moved));
+  const want = (await J('G.cards'))[2], pr = await J('G.chooseRect');
+  const pc = L(pr.x + pr.w / 2, pr.y + pr.h / 2);
+  await b.tap(pc.x, pc.y, 50, 26); await sleep(320);
+  const done = await J('({state: G.state, picks: G.picks})');
+  if (done.state !== 'UPGRADE' && done.picks[want] === 1) ok(`(c) the CHOOSE pill took card B (${want})`);
+  else fail('(c) CHOOSE did not confirm: ' + JSON.stringify(done));
+}
+
+// (d) press a card, slide off it, let go
+{
+  await freshCards(false);
+  const c0 = await cardCentre(0);
+  await b.touch([{ x: c0.x, y: c0.y, id: 27 }], 'touchStart');
+  await sleep(90);
+  await b.touch([{ x: c0.x, y: H - 8, id: 27 }], 'touchMove');   // off the bottom of the card
+  await sleep(90);
+  await b.touch([], 'touchEnd');
+  await sleep(260);
+  const st = await J('({state: G.state, sel: G.cardSelection})');
+  if (st.state === 'UPGRADE' && st.sel === -1) ok('(d) press-and-slide-off picks nothing: ' + JSON.stringify(st));
+  else fail('(d) a slide-off was taken as a tap: ' + JSON.stringify(st));
+}
+checkErrors('card screen');
+
+console.log('== the same protection on the GAME OVER card');
+// (e) a thumb held across the death, released on the retry area
+{
+  await G('G.startRun()'); await sleep(220); await G('G.setGod(true)');
+  await b.touch([{ x: 660, y: 300, id: 30 }], 'touchStart');
+  await sleep(140);
+  await G('G.forceGameOver(0, 1)');
+  await waitFor('GAMEOVER', `G.state === 'GAMEOVER'`, 4000);
+  await sleep(500);
+  await b.touch([{ x: mid.x, y: mid.y, id: 30 }], 'touchMove');
+  await sleep(90);
+  await b.touch([], 'touchEnd');                                 // released right on TAP TO RETRY
+  await sleep(320);
+  if (await G(`G.state === 'GAMEOVER'`)) ok('(e) a thumb held across the death does not retry');
+  else fail('(e) a held thumb restarted the run: ' + (await G('G.state')));
+  await b.tap(mid.x, mid.y, 60, 31);                             // a fresh tap, past UI_ARM_MS
+  await sleep(400);
+  if (await G(`G.state === 'PLAYING'`)) ok('(e) ...and a fresh tap still does'); else fail('(e) retry broke: ' + (await G('G.state')));
+}
+checkErrors('end card');
+
 console.log('== the fire mode survives a reload');
 await b.goto('file://' + html);
 await sleep(700);
