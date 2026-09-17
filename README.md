@@ -82,8 +82,9 @@ trail behind him. He is pre-rendered the same way (both frames plus a white silh
 as a priest at 1x in a crowd (`tools/shots/char-1x.png` puts the two side by side on the flagstones).
 
 Nothing about him is a stat: the gun, the recoil, the hearts and the Blessings are identical. What
-changes is flavour — the subtitle, two of the six game-over quotes (*Goodnight, sweet nun.* becomes
-*Goodnight, padre.*; *Alas, poor Ophelia.* becomes *Alas, poor Horatio.*) — and the title on the board.
+changes is flavour — the subtitle, and two of the six game-over quotes (*Goodnight, sweet nun.* becomes
+*Goodnight, padre.*; *Alas, poor Ophelia.* becomes *Alas, poor Horatio.*). The score you post carries a
+quiet `c` flag saying which of them played it; the board still shows the name you typed and nothing else.
 
 ## THE HOLY ORDER — the global leaderboard
 
@@ -93,14 +94,6 @@ that ten, and the GAME OVER (and ENCORE) card asks for a name — **1 to 12 char
 single spaces**, uppercased, trimmed, no leading space, prefilled with the last one you used. Type
 and press Enter on a keyboard; on a phone, tap the field to raise the on-screen keyboard and use
 *done*, or the SUBMIT / SKIP pills.
-
-**Titles on the board.** The score document carries a character flag `c` (`0` nun, `1` priest) and the
-panel puts **SISTER** or **FATHER** in front of the name in a smaller, lighter weight — never on the wire,
-only on the board, and never twice: a name that already opens with a title word (`SISTER`, `SR`, `FATHER`,
-`FR`, `BROTHER`, `BR`, `MOTHER`, `ABBESS`, `FRIAR`) keeps the one its owner typed, and a row from before
-`c` existed reads as a SISTER. A row that will not fit gives ground in order — a size down, then `SR`/`FR`
-for the title, then a size down again, and only then an ellipsis on the name. The name entry shows the
-result live under the field: **→ FATHER DAVE**.
 
 **The board then stays on the card.** After SUBMIT or SKIP — and straight away when there is no entry
 to offer — the same top-ten panel is drawn on the end card with your row picked out in amber, and
@@ -156,7 +149,7 @@ Add `?debug=1` to the URL, or press the backtick key, to toggle the debug overla
 `window.GAME` is the same handle the test harness drives: `startRun()`, `skipToWave(n)`, `spawn(type, n)`, `spawnAt(type, x, y)`, `killAll()`, `forceCards()`, `pickCard(i)`, `setGod(b)`, `setTimeScale(x)`, `snapshot()`, plus `touchMode` (get/set), `touchFireMode` (get/set: `'flick'` | `'hold'`), `sticks`, `touchButtons`, `firePill`, `fullscreen`, `fullscreenAvailable` and `rotatePrompt` for the touch build.
 For the leaderboard: `leaderboard` (`{available, status, top, lastError}`), `leaderboardCollection` (get/set),
 `refreshLeaderboard(force)`, `submitScore(name, score, wave, c)` (`c` defaults to the current character),
-`displayName(name, c)`, `cleanName(s)`, `validName(s)`, `nameEntry`, `entryUI`,
+`cleanName(s)`, `validName(s)`, `nameEntry`, `entryUI`,
 `playerName` (`initials` is kept as an alias), `endCard` (`{board, rect, highlight, rank, rankLine, titlePill}`),
 `keyboard` (`{up, entryUp, rect, layoutH, layout}`), `debugKeyboardRect(h)` to fake a shrunken visual viewport, and
 `forceGameOver(score, wave)` to land straight on an end card with a chosen score. For the characters:
@@ -185,8 +178,8 @@ keyboard-aware layout (via `GAME.debugKeyboardRect(150)`, since CDP cannot shrin
 submits exactly one document with exactly the four expected fields, that the one aggregation call turns a count of 36
 into *#37*, that the board lands on the game-over card with her row highlighted, that the TITLE pill and Esc reach the
 title, that a small score gets no entry, that SKIP sends nothing even though the blur it causes fires a `change` event,
-that `SISTER`/`FATHER` lands in front of the right names (and never in front of a name that brought its
-own title), that a priest's submit carries `"c":{"integerValue":"1"}` and a nun's carries `"0"`, and that
+that the character flag rides along without touching the name (a priest's submit carries
+`"c":{"integerValue":"1"}`, a nun's carries `"0"`, and a row with no `c` at all reads as `0`), and that
 going offline — or having the host blocked outright — is completely silent. `--live` adds a real read of the
 live board, one twelve-character write into the `scores_test` collection and a real aggregation query, read back
 independently from Node.

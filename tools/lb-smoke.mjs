@@ -145,35 +145,20 @@ const b = await launch({ width: W, height: H });
   }
   if ((await b.eval(`window.GAME.validName('')`)) === false) ok('the empty name is rejected'); else fail('validName("") was true');
 
-  console.log('== SISTER / FATHER in front of a name (never on the wire, only on the board)');
-  for (const [args, want] of [
-    [`'DAVE', 1`, 'FATHER DAVE'],
-    [`'DAVE', 0`, 'SISTER DAVE'],
-    [`'DAVE'`, 'SISTER DAVE'],
-    [`'FR DAVE', 0`, 'FR DAVE'],
-    [`'SISTER MARY', 1`, 'SISTER MARY'],
-    [`'MOTHER GERT', 1`, 'MOTHER GERT'],
-    [`'FRIAR TUCK', 0`, 'FRIAR TUCK'],
-    [`'SR ANNE', 1`, 'SR ANNE'],
-    [`'SISTERS', 1`, 'FATHER SISTERS'],
-    [`'dave', 1`, 'FATHER DAVE'],
-  ]) {
-    const got = await b.eval(`window.GAME.displayName(${args})`);
-    if (got === want) ok(`displayName(${args}) -> ${JSON.stringify(got)}`);
-    else fail(`displayName(${args}) = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
-  }
-
-  console.log('== the board draws the mixed titles, and the names still fit the rows');
+  console.log('== the character flag rides along without touching the name');
   {
     const rows = await J('G.leaderboard.top');
-    const wantDisplay = ['FATHER ROS', 'SISTER GUILDENSTERN', 'FATHER OPH', 'SISTER HAM', 'SISTER LAE', 'FR BERNARDO', 'FATHER HOR', 'SISTER FOR', 'MOTHER GERT', 'FATHER BER'];
-    const got = rows.map((r) => r.display);
-    if (JSON.stringify(got) === JSON.stringify(wantDisplay)) ok('the panel reads: ' + got.join(' · '));
-    else fail('the board titles are wrong: ' + JSON.stringify(got));
-    if (rows[4].c === 0) ok('a row with no c field at all is a SISTER'); else fail('a c-less row came back as ' + rows[4].c);
-    // the panel itself, so a human can see that SISTER GUILDENSTERN fits between the rank and the score
+    const names = rows.map((r) => r.name);
+    const wantNames = ['ROS', 'GUILDENSTERN', 'OPH', 'HAM', 'LAE', 'FR BERNARDO', 'HOR', 'FOR', 'MOTHER GERT', 'BER'];
+    if (JSON.stringify(names) === JSON.stringify(wantNames)) ok('the panel draws the names exactly as they were typed: ' + names.join(' · '));
+    else fail('the board is not drawing the raw names: ' + JSON.stringify(names));
+    if (JSON.stringify(rows.map((r) => r.c)) === JSON.stringify([1, 0, 1, 0, 0, 1, 1, 0, 0, 1])) ok('every row carries its c flag');
+    else fail('the c flags came back wrong: ' + JSON.stringify(rows.map((r) => r.c)));
+    if (rows[4].c === 0) ok('a row with no c field at all reads as 0'); else fail('a c-less row came back as ' + rows[4].c);
+    // the panel itself: twelve characters still have to fit between the rank and the score
     const pr = await J(`G.toScreen(${652 - 8}, ${34 - 8})`);
-    await shot('char-board', { x: Math.round(pr.x), y: Math.round(pr.y), width: Math.round(300 * (await J('G.viewport.scale'))), height: Math.round(298 * (await J('G.viewport.scale'))) });
+    const sc = await J('G.viewport.scale');
+    await shot('char-board', { x: Math.round(pr.x), y: Math.round(pr.y), width: Math.round(300 * sc), height: Math.round(298 * sc) });
   }
 
   console.log('== the 60 s cache + in-flight dedupe');
@@ -265,8 +250,6 @@ const b = await launch({ width: W, height: H });
     const nun = p2[p2.length - 1];
     if (nun && nun.raw.indexOf('"c":{"integerValue":"0"}') >= 0) ok('...and the nun sends "c":{"integerValue":"0"}');
     else fail('the nun flag is wrong: ' + (nun && nun.raw));
-    if ((await b.eval(`window.GAME.displayName('LATIN PADRE', 1)`)) === 'FATHER LATIN PADRE') ok('the board will call him FATHER LATIN PADRE');
-    else fail('bad display for the priest row');
     await b.eval(`GAME.refreshLeaderboard(true)`);
     await sleep(400);
   }
