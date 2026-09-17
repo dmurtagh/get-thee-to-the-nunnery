@@ -40,9 +40,11 @@ console.log('== serving ' + html + ' at ' + URL);
 // ---- the mock. Ten canned rows; every submit is recorded AND folded back into the query result,
 // so the board the game reads back after a submit is the board a real backend would have given it.
 // The aggregation query always answers 36, so the exact rank must come out as #37.
+// [name, score, wave, c] - c is 0 (nun), 1 (priest) or null for a row written before characters
+// existed, which must read as a SISTER. Two rows carry a title of their own and must keep it.
 const CANNED = [
-  ['ROS', 98450, 11], ['GUILDENSTERN', 87310, 10], ['OPH', 76220, 10], ['HAM', 64100, 9], ['LAE', 51880, 8],
-  ['POL', 42330, 7], ['HOR', 31200, 6], ['FOR', 18770, 5], ['MAR', 9410, 4], ['BER', 1000, 2],
+  ['ROS', 98450, 11, 1], ['GUILDENSTERN', 87310, 10, 0], ['OPH', 76220, 10, 1], ['HAM', 64100, 9, 0], ['LAE', 51880, 8, null],
+  ['FR BERNARDO', 42330, 7, 1], ['HOR', 31200, 6, 1], ['FOR', 18770, 5, 0], ['MOTHER GERT', 9410, 4, 0], ['BER', 1000, 2, 1],
 ];
 const AGG_COUNT = 36;
 const MOCK = `
@@ -59,18 +61,20 @@ window.fetch = function (u, o) {
   }
   if (u.indexOf(':runQuery') >= 0) {
     window.__lb.queries++;
-    const rows = CANNED.map((r) => ({ name: r[0], score: r[1], wave: r[2] })).concat(window.__lb.submits)
+    const rows = CANNED.map((r) => ({ name: r[0], score: r[1], wave: r[2], c: r[3] })).concat(window.__lb.submits)
       .sort((a, b) => b.score - a.score).slice(0, 10)
-      .map((r) => ({ document: { name: 'documents/scores/x', fields: {
+      .map((r) => { const f = {
         name: { stringValue: r.name }, score: { integerValue: String(r.score) },
-        wave: { integerValue: String(r.wave) }, v: { integerValue: '1' } } } }));
+        wave: { integerValue: String(r.wave) }, v: { integerValue: '1' } };
+        if (r.c === 0 || r.c === 1) f.c = { integerValue: String(r.c) };
+        return { document: { name: 'documents/scores/x', fields: f } }; });
     rows.push({ readTime: '1970-01-01T00:00:00Z' });   // a row with no document: the parser must skip it
     return reply(rows);
   }
   if (/\\/documents\\/[A-Za-z0-9_]+\\?key=/.test(u)) {
     const b = JSON.parse(o.body);
-    window.__lb.posts.push({ url: u, body: b });
-    window.__lb.submits.push({ name: b.fields.name.stringValue, score: +b.fields.score.integerValue, wave: +b.fields.wave.integerValue });
+    window.__lb.posts.push({ url: u, body: b, raw: String(o.body) });
+    window.__lb.submits.push({ name: b.fields.name.stringValue, score: +b.fields.score.integerValue, wave: +b.fields.wave.integerValue, c: b.fields.c ? +b.fields.c.integerValue : null });
     return reply({ name: 'documents/scores/new', fields: b.fields }, 200);
   }
   return reply({ error: { message: 'unexpected ' + u } }, 404);
@@ -118,7 +122,7 @@ const b = await launch({ width: W, height: H });
   if (lb.available) ok('GAME.leaderboard.available over http'); else fail('leaderboard unavailable over http: ' + JSON.stringify(lb));
   if (lb.top && lb.top.length === 10) ok('the top ten came back: ' + lb.top.map((r) => r.name).join(','));
   else fail('GAME.leaderboard.top is not ten rows: ' + JSON.stringify(lb.top));
-  if (lb.top && lb.top[0].name === 'ROS' && lb.top[0].score === 98450 && lb.top[0].wave === 11) ok('row 1 parsed: ROS 98,450 W11');
+  if (lb.top && lb.top[0].name === 'ROS' && lb.top[0].score === 98450 && lb.top[0].wave === 11 && lb.top[0].c === 1) ok('row 1 parsed: ROS 98,450 W11, c 1');
   else fail('row 1 parsed wrong: ' + JSON.stringify(lb.top && lb.top[0]));
   if (lb.top && lb.top[1].name === 'GUILDENSTERN') ok('a twelve-character name survives the parser: GUILDENSTERN');
   else fail('a long name did not survive parseRows: ' + JSON.stringify(lb.top && lb.top[1]));
@@ -140,6 +144,37 @@ const b = await launch({ width: W, height: H });
     ok(`cleanName(${JSON.stringify(raw)}) -> ${JSON.stringify(got)} (server regex ok)`);
   }
   if ((await b.eval(`window.GAME.validName('')`)) === false) ok('the empty name is rejected'); else fail('validName("") was true');
+
+  console.log('== SISTER / FATHER in front of a name (never on the wire, only on the board)');
+  for (const [args, want] of [
+    [`'DAVE', 1`, 'FATHER DAVE'],
+    [`'DAVE', 0`, 'SISTER DAVE'],
+    [`'DAVE'`, 'SISTER DAVE'],
+    [`'FR DAVE', 0`, 'FR DAVE'],
+    [`'SISTER MARY', 1`, 'SISTER MARY'],
+    [`'MOTHER GERT', 1`, 'MOTHER GERT'],
+    [`'FRIAR TUCK', 0`, 'FRIAR TUCK'],
+    [`'SR ANNE', 1`, 'SR ANNE'],
+    [`'SISTERS', 1`, 'FATHER SISTERS'],
+    [`'dave', 1`, 'FATHER DAVE'],
+  ]) {
+    const got = await b.eval(`window.GAME.displayName(${args})`);
+    if (got === want) ok(`displayName(${args}) -> ${JSON.stringify(got)}`);
+    else fail(`displayName(${args}) = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+  }
+
+  console.log('== the board draws the mixed titles, and the names still fit the rows');
+  {
+    const rows = await J('G.leaderboard.top');
+    const wantDisplay = ['FATHER ROS', 'SISTER GUILDENSTERN', 'FATHER OPH', 'SISTER HAM', 'SISTER LAE', 'FR BERNARDO', 'FATHER HOR', 'SISTER FOR', 'MOTHER GERT', 'FATHER BER'];
+    const got = rows.map((r) => r.display);
+    if (JSON.stringify(got) === JSON.stringify(wantDisplay)) ok('the panel reads: ' + got.join(' · '));
+    else fail('the board titles are wrong: ' + JSON.stringify(got));
+    if (rows[4].c === 0) ok('a row with no c field at all is a SISTER'); else fail('a c-less row came back as ' + rows[4].c);
+    // the panel itself, so a human can see that SISTER GUILDENSTERN fits between the rank and the score
+    const pr = await J(`G.toScreen(${652 - 8}, ${34 - 8})`);
+    await shot('char-board', { x: Math.round(pr.x), y: Math.round(pr.y), width: Math.round(300 * (await J('G.viewport.scale'))), height: Math.round(298 * (await J('G.viewport.scale'))) });
+  }
 
   console.log('== the 60 s cache + in-flight dedupe');
   {
@@ -209,6 +244,32 @@ const b = await launch({ width: W, height: H });
   if (!small.active) ok(`no entry for 500 (10th is ${board[9].score}, best is 123,456)`); else fail('entry shown for a 500-point run');
   if (await G('G.endCard.board')) ok('...and the board is drawn immediately'); else fail('no board when no entry was offered');
   if ((await b.eval('window.__lb.posts.length')) === 0) ok('nothing has been sent all session'); else fail('something was posted');
+
+  console.log('== FATHER HORATIO puts c = 1 on the wire');
+  {
+    const before = await b.eval('window.__lb.posts.length');
+    await b.eval(`GAME.character = 'priest'`);
+    if ((await G('G.character')) === 'priest') ok('GAME.character = priest'); else fail('the character did not change');
+    const sent = await b.eval(`window.GAME.submitScore('LATIN PADRE', 4321, 6)`);
+    if (sent === true) ok('the submit resolved true'); else fail('the priest submit resolved ' + sent);
+    const posts = await b.eval('JSON.stringify(window.__lb.posts)').then(JSON.parse);
+    const last = posts[posts.length - 1];
+    if (posts.length === before + 1) ok('exactly one more POST'); else fail(`${posts.length - before} POSTs for one submit`);
+    if (last && last.raw.indexOf('"c":{"integerValue":"1"}') >= 0) ok('the body carries "c":{"integerValue":"1"}');
+    else fail('no priest flag in the body: ' + (last && last.raw));
+    // ...and back to the nun, which is a 0 and not a missing field
+    await b.eval(`GAME.character = 'nun'`);
+    await b.eval(`window.GAME.submitScore('PLAIN SISTER', 4320, 6)`);
+    await sleep(200);
+    const p2 = await b.eval('JSON.stringify(window.__lb.posts)').then(JSON.parse);
+    const nun = p2[p2.length - 1];
+    if (nun && nun.raw.indexOf('"c":{"integerValue":"0"}') >= 0) ok('...and the nun sends "c":{"integerValue":"0"}');
+    else fail('the nun flag is wrong: ' + (nun && nun.raw));
+    if ((await b.eval(`window.GAME.displayName('LATIN PADRE', 1)`)) === 'FATHER LATIN PADRE') ok('the board will call him FATHER LATIN PADRE');
+    else fail('bad display for the priest row');
+    await b.eval(`GAME.refreshLeaderboard(true)`);
+    await sleep(400);
+  }
 
   console.log('== a run worth nothing never asks for a name');
   await b.eval(`GAME.forceGameOver(0, 1)`);
@@ -365,12 +426,12 @@ await b.close();
   if (posts.length === 1) ok('exactly one POST'); else fail(`${posts.length} POST(s), expected 1`);
   if (posts[0]) {
     const fl = posts[0].body.fields;
-    const got = { name: fl.name && fl.name.stringValue, score: fl.score && fl.score.integerValue, wave: fl.wave && fl.wave.integerValue, v: fl.v && fl.v.integerValue };
-    const wantDoc = { name: 'SISTER MARY', score: '123456', wave: '7', v: '1' };
+    const got = { name: fl.name && fl.name.stringValue, score: fl.score && fl.score.integerValue, wave: fl.wave && fl.wave.integerValue, v: fl.v && fl.v.integerValue, c: fl.c && fl.c.integerValue };
+    const wantDoc = { name: 'SISTER MARY', score: '123456', wave: '7', v: '1', c: '0' };
     if (JSON.stringify(got) === JSON.stringify(wantDoc)) ok('the document is exactly ' + JSON.stringify(got));
     else fail('wrong fields: ' + JSON.stringify(got) + ' want ' + JSON.stringify(wantDoc));
     if (SERVER_RE.test(got.name)) ok('the submitted name passes the server regex'); else fail('the submitted name would be refused: ' + got.name);
-    if (Object.keys(fl).length === 4) ok('four fields and no more'); else fail('extra fields: ' + Object.keys(fl).join(','));
+    if (Object.keys(fl).length === 5) ok('five fields and no more'); else fail('extra fields: ' + Object.keys(fl).join(','));
     if (/\/documents\/scores\?key=/.test(posts[0].url)) ok('POSTed to /documents/scores?key=');
     else fail('wrong submit URL: ' + posts[0].url);
   }
@@ -463,6 +524,12 @@ if (args.includes('--live')) {
   const sent = await l.eval(`window.GAME.submitScore('LIVE TEST', 2, 1)`);
   if (sent === true) ok("GAME.submitScore('LIVE TEST', 2, 1) resolved true (the CREATE was accepted)");
   else fail("GAME.submitScore('LIVE TEST', 2, 1) resolved " + sent + ' — lastError ' + (await G('G.leaderboard.lastError')));
+  console.log('== LIVE: and one from FATHER HORATIO, with the character flag on it');
+  await l.eval(`GAME.character = 'priest'`);
+  const padre = await l.eval(`window.GAME.submitScore('LIVE PADRE', 4, 1)`);
+  if (padre === true) ok("GAME.character='priest'; GAME.submitScore('LIVE PADRE', 4, 1) resolved true");
+  else fail("the priest's CREATE was refused: " + padre + ' - lastError ' + (await G('G.leaderboard.lastError')));
+  await l.eval(`GAME.character = 'nun'`);
   await l.eval(`GAME.refreshLeaderboard(true)`);
   await waitFor('the test board to come back', `G.leaderboard.top !== null`, 8000);
   console.log('  scores_test (through the game) = ' + JSON.stringify(await J('G.leaderboard.top')));
@@ -483,6 +550,10 @@ if (args.includes('--live')) {
   const mine = docs.filter((d) => d.document.fields.name.stringValue === 'LIVE TEST');
   if (mine.length) ok(`the LIVE TEST row is on the server: ${JSON.stringify(mine[mine.length - 1].document.fields)}`);
   else fail('no LIVE TEST row in scores_test');
+  const padreRows = docs.filter((d) => d.document.fields.name.stringValue === 'LIVE PADRE');
+  const withC = padreRows.filter((d) => d.document.fields.c && d.document.fields.c.integerValue === '1');
+  if (withC.length) ok(`the LIVE PADRE row went in with c = 1: ${JSON.stringify(withC[withC.length - 1].document.fields)}`);
+  else fail('no LIVE PADRE row with c = 1 in scores_test (rows seen: ' + padreRows.length + ')');
 
   const a = await fetch(`${BASE}:runAggregationQuery?key=${KEY}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },

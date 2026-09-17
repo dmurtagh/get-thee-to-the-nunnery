@@ -49,6 +49,40 @@ if (await G('G.touchMode')) ok('a coarse pointer boots straight into touchMode (
 else fail('touchMode off on a phone viewport: the title would show the WASD hint');
 await shot('touch2-title');
 
+console.log('== the title hero swaps the character, and never starts the run');
+{
+  const before = await J('G.characterInfo');
+  if (before.id === 'nun' && before.subtitle === 'She took the advice.') ok('the poster opens as SISTER OPHELIA: "' + before.subtitle + '"');
+  else fail('the title did not open on the nun: ' + JSON.stringify(before));
+  const hc = L(before.hero.x + before.hero.w / 2, before.hero.y + before.hero.h / 2);
+  await b.tap(hc.x, hc.y, 70, 40);
+  await sleep(300);
+  const after = await J('G.characterInfo');
+  if ((await G('G.character')) === 'priest') ok('a tap on the hero made him FATHER HORATIO');
+  else fail('the hero tap did not swap: ' + (await G('G.character')));
+  if (after.subtitle === 'He took the advice.' && after.subtitle !== before.subtitle) ok('the subtitle swapped live: "' + after.subtitle + '"');
+  else fail('the subtitle did not change: ' + JSON.stringify(after.subtitle));
+  if (after.name === 'FATHER HORATIO') ok('the pill reads FATHER HORATIO'); else fail('the pill says ' + after.name);
+  if (await G(`G.state === 'TITLE'`)) ok('...and the tap did NOT start a run'); else fail('the hero tap started the run: ' + (await G('G.state')));
+  await shot('touch2-title-priest');
+  // the pill under him toggles the same way, and puts her back
+  const pill = after.pill, pc = L(pill.x + pill.w / 2, pill.y + pill.h / 2);
+  await b.tap(pc.x, pc.y, 70, 41);
+  await sleep(300);
+  const back = await J('G.characterInfo');
+  if (back.id === 'nun' && back.subtitle === 'She took the advice.') ok('a tap on the pill put SISTER OPHELIA back');
+  else fail('the pill did not swap back: ' + JSON.stringify(back));
+  if (await G(`G.state === 'TITLE'`)) ok('...and the pill did not start a run either'); else fail('the pill tap started the run');
+  // the pill must not sit under the screen-space buttons, whichever corner they are in
+  const btns = await J('G.touchButtons.map((x) => ({ id: x.id, L: G.toLogical(x.x, x.y) }))');
+  const near = btns.filter((x) => x.L.x > back.pill.x - 30 && x.L.x < back.pill.x + back.pill.w + 30 && x.L.y > back.pill.y - 30 && x.L.y < back.pill.y + back.pill.h + 30);
+  if (!near.length) ok('the touch buttons keep clear of the character pill: ' + btns.map((x) => x.id + '@' + Math.round(x.L.x) + ',' + Math.round(x.L.y)).join(' '));
+  else fail('a button sits on the character pill: ' + JSON.stringify(near));
+  if (back.pill.y + back.pill.h <= 540 - 4 && back.pill.x + back.pill.w <= 960 - 4) ok('the pill fits the poster: ' + JSON.stringify(back.pill));
+  else fail('the pill runs off the poster: ' + JSON.stringify(back.pill));
+}
+checkErrors('character select');
+
 console.log('== the canvas fills the viewport, the arena is letterboxed INSIDE it');
 const rect = await J(`(() => { const r = document.getElementById('c').getBoundingClientRect(); return { x: r.x, y: r.y, w: Math.round(r.width), h: Math.round(r.height) }; })()`);
 if (Math.abs(rect.w - W) <= 2 && Math.abs(rect.h - H) <= 2 && Math.abs(rect.x) <= 1 && Math.abs(rect.y) <= 1)

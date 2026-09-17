@@ -92,6 +92,10 @@ const CONFIG = {
   // unlocks and HARD HABIT (spec §8)
   UNLOCK_WAVE: 5, UNLOCK_KILLS: 500, UNLOCK_RUNS: 3, UNLOCK_WINS: 1,
   HARD_WAVE: 4, HARD_HEARTS: 2, HARD_MULT: 1.5, HARD_PILL_W: 214, HARD_PILL_H: 34, HARD_PILL_X: 66, HARD_PILL_Y: 388,
+  // the title poster's hero, the box you can tap on her, and the character pill under her feet.
+  // The M keycap moved up under the board (TITLE_MUTE_Y) so the pill has the bottom corner alone.
+  TITLE_HERO_X: 762, TITLE_HERO_Y: 494, TITLE_HERO_S: 4.05, TITLE_HERO_W: 92, TITLE_HERO_H: 140,
+  CHAR_PILL_H: 28, CHAR_PILL_Y: 500, TITLE_MUTE_Y: 336,
   // the Ghost (spec §5): enters on the border point behind the player's aim, wave 6+, dissolves upward
   GHOST_ALPHA: 0.72, GHOST_WAVER_AMP: 0.32, GHOST_WAVER_FREQ: 2.4, GHOST_WISPS: 14, GHOST_RISE: -260, GHOST_FADE_T: 1.0,
   // music (spec §12 last row): own gain ~12 dB under the sfx bus, ducked on every shot
@@ -168,6 +172,8 @@ const PAL = {
   habit: '#262633',          // the habit is CHARCOAL: pure black is a hole in the indigo floor
   habitHi: '#3c3c4e', eye: '#14141c', shoe: '#111118',
   gunDark: '#2b2e3a', gunHi: '#4d515f', stock: '#6b4226', stockHi: '#8a5a34', pump: '#8a8f9c',
+  // the priest: the gunstock brown taken two steps down for hair, and one up for the part
+  hair: '#3b2a22', hairHi: '#5a4130',
   boneShade: '#cfc9ba', greyGreen: '#8a9c8c', greyGreenShade: '#5d6f60',
   purpleShade: '#56297a', paleFace: '#d8c3e0', ghost: '#8fe3ff', ghostShade: '#5fb5d6',
   heart: '#e0475a', heartHi: '#ff8a96', brassDark: '#a87a2c', borderHi: '#7c8398', gateDark: '#0d0f1c',
@@ -181,6 +187,35 @@ const FAM_SANS = '-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Aria
 const FSERIF = (px, italic) => (italic ? 'italic ' : '') + 'bold ' + px + 'px ' + FAM_SERIF;
 const FSANS = (px, regular) => (regular ? '' : 'bold ') + px + 'px ' + FAM_SANS;
 const VERSION = '1.0.0-m8';
+
+// ---------------------------------------------------------------- THE TWO OF THE ORDER
+// Two playable characters, and the difference is COSMETIC: the same gun, the same stats, the same
+// numbers the sim reads. A character owns its sprite key, the poster subtitle, the title the board
+// puts in front of a name, and the handful of game-over quotes that name a nun out loud.
+const CHARACTERS = [
+  { id: 'nun', c: 0, name: 'SISTER OPHELIA', title: 'SISTER', pronounSub: 'She took the advice.', quotes: {} },
+  {
+    id: 'priest', c: 1, name: 'FATHER HORATIO', title: 'FATHER', pronounSub: 'He took the advice.',
+    quotes: { 'Goodnight, sweet nun.': 'Goodnight, padre.', 'Alas, poor Ophelia.': 'Alas, poor Horatio.' },
+  },
+];
+const CHAR_DEF = {};
+for (const d of CHARACTERS) CHAR_DEF[d.id] = d;
+function charDef(id) { return CHAR_DEF[id] || CHARACTERS[0]; }
+// charId() is the SELECTION (the poster, and whoever the next run will be); G.character is the copy
+// the run itself was started with, and that is what the world draws.
+function charId() { return charDef(Save.data.character).id; }
+function charC() { return charDef(charId()).c; }
+function runCharId() { return charDef(G && G.character ? G.character : Save.data.character).id; }
+function setCharId(id) {
+  const d = charDef(id);
+  Save.data.character = d.id; Save.save();
+  if (G) G.character = d.id;
+  return d.id;
+}
+function otherCharId() { return charId() === CHARACTERS[0].id ? CHARACTERS[1].id : CHARACTERS[0].id; }
+// the priest never hears "sweet nun": one lookup, and every other line is untouched
+function charQuote(q, id) { const m = charDef(id).quotes; return (m && m[q]) || q; }
 
 // ===================================================================== UTIL
 const TAU = Math.PI * 2;
@@ -324,7 +359,7 @@ document.addEventListener('fullscreenchange', () => setTimeout(resize, 50));
 // persistence: localStorage with an in-memory fallback, never throws
 const Save = (() => {
   const KEY = 'nunnery.v1';
-  const def = () => ({ hi: 0, bestWave: 0, kills: 0, runs: 0, wins: 0, unlocks: [], mute: false, touchFire: CONFIG.TOUCH_FIRE_MODE, hints: {}, playerName: 'SISTER' });
+  const def = () => ({ hi: 0, bestWave: 0, kills: 0, runs: 0, wins: 0, unlocks: [], mute: false, touchFire: CONFIG.TOUCH_FIRE_MODE, hints: {}, playerName: 'SISTER', character: 'nun' });
   let data = def();
   function load() {
     try {
@@ -334,6 +369,7 @@ const Save = (() => {
         for (const k in d) if (o && typeof o[k] === typeof d[k] && Array.isArray(o[k]) === Array.isArray(d[k])) d[k] = o[k];
         // a save from before names got long carries three arcade initials: they become the name
         if (o && typeof o.playerName !== 'string' && typeof o.initials === 'string' && o.initials) d.playerName = o.initials;
+        if (!CHAR_DEF[d.character]) d.character = CHARACTERS[0].id;   // an unknown id is a nun
         data = d;
       }
     } catch (e) { data = def(); }
@@ -407,8 +443,10 @@ const LB = (() => {
       const name = f.name && typeof f.name.stringValue === 'string' ? cleanName(f.name.stringValue) : '';
       const score = f.score ? parseInt(f.score.integerValue, 10) : NaN;
       const wave = f.wave ? parseInt(f.wave.integerValue, 10) : NaN;
+      const ch = f.c ? parseInt(f.c.integerValue, 10) : NaN;
       if (!name || !isFinite(score)) continue;
-      out.push({ name, score, wave: isFinite(wave) ? wave : 0 });
+      // c is optional and always has been: every row without one is a SISTER
+      out.push({ name, score, wave: isFinite(wave) ? wave : 0, c: ch === 1 ? 1 : 0 });
     }
     out.sort((a, b) => b.score - a.score);
     return out.slice(0, CF.top);
@@ -443,13 +481,27 @@ const LB = (() => {
   function cleanName(s) { return cleanTyping(s).replace(/ +$/, ''); }
   const NAME_RE = /^[A-Z0-9][A-Z0-9 ]{0,11}$/;
   function validName(s) { return NAME_RE.test(String(s == null ? '' : s)); }
+  // ---- the title in front of a name on the board. The name itself is never touched on the wire:
+  // the row carries c (0 nun, 1 priest) and the PANEL puts SISTER or FATHER in front of it. A name
+  // that already opens with a title word keeps the one its owner typed.
+  const TITLED_RE = /^(SISTER|SR|FATHER|FR|BROTHER|BR|MOTHER|ABBESS|FRIAR)\b/;
+  function titlePrefix(name, c) {
+    if (TITLED_RE.test(cleanName(name))) return '';
+    return charDef(+c === 1 ? 'priest' : 'nun').title + ' ';
+  }
+  function displayName(name, c) {
+    const n = cleanName(name);
+    if (!n) return '';
+    return titlePrefix(n, c) + n;
+  }
   // one CREATE. Resolves true/false; the caller decides what to say about it.
-  function submit(name, score, wave) {
+  function submit(name, score, wave, c) {
     const n = cleanName(name);
     const s = clamp(Math.round(+score || 0), 0, 2000000) | 0;
     const w = clamp(Math.round(+wave || 1), 1, 200) | 0;
+    const ch = (c == null ? charC() : +c) === 1 ? 1 : 0;
     if (!available() || !n || !validName(n)) return Promise.resolve(false);
-    const body = { fields: { name: { stringValue: n }, score: { integerValue: String(s) }, wave: { integerValue: String(w) }, v: { integerValue: String(CF.version | 0) } } };
+    const body = { fields: { name: { stringValue: n }, score: { integerValue: String(s) }, wave: { integerValue: String(w) }, v: { integerValue: String(CF.version | 0) }, c: { integerValue: String(ch) } } };
     return post(base() + '/' + collection + '?' + key(), body).then(
       () => { top = null; topAt = -1e9; lastError = null; return true; },   // the board just moved: drop the cache
       (e) => { warn(e); return false; },
@@ -503,6 +555,7 @@ const LB = (() => {
   }
   return {
     available, fetchTop, submit, status, wouldPlace, rankOf, rankExact, cleanName, cleanTyping, validName,
+    displayName, titlePrefix,
     get nameMax() { return CF.nameMax; },
     get top() { return top; },
     get lastError() { return lastError; },
@@ -772,6 +825,8 @@ function uiTargetAt(cx, cy, pad) {
   if (st === 'TITLE') {
     if (hardUnlocked() && hitL(hardPillRect())) return 'hard';
     if (showA2HS() && hitL(a2hsCloseRect())) return 'a2hs';
+    if (hitL(charPillRect())) return 'pill:char';   // ...and the hero herself swaps, she never starts
+    if (hitL(heroRect())) return 'hero';
     return 'bg';
   }
   if (st === 'UPGRADE') {
@@ -1128,6 +1183,8 @@ const Audio = (() => {
   // ---- sounds (filled in as the systems land)
   const S = {};
   S.click = () => { const v = voice('click'); if (!v) return; const t = ac.currentTime; osc({ type: 'sine', f0: 1200, f1: 900, dur: 0.05, peak: 0.25 * v, t }); noiseBurst({ t, dur: 0.012, peak: 0.2 * v, type: 'highpass', f0: 3000 }); };
+  // the click's quieter cousin, swept the other way: a UI tick for something that toggled, not chose
+  S.tick = () => { const v = voice('tick'); if (!v) return; const t = ac.currentTime; osc({ type: 'sine', f0: 820, f1: 1340, sweep: 0.035, dur: 0.07, peak: 0.16 * v, t }); noiseBurst({ t, dur: 0.01, peak: 0.08 * v, type: 'highpass', f0: 4200 }); };
   // THE BLAST. click transient + bandpass-swept noise + sine thump + triangle body, all jittered, then the bus shaper adds grit.
   S.blast = () => {
     const v = voice('blast'); if (!v) return; const t = ac.currentTime, j = jit();
@@ -1405,6 +1462,75 @@ function drawNun(c, x, y, s, o) {
   c.fillRect(-2.4, -22.9, 1.5, 1.7);
   c.fillRect(0.9, -22.9, 1.5, 1.7);
   c.fillRect(-0.8, -19.4, 1.6, 0.8);
+  c.restore();
+}
+
+// ---------------------------------------------------------------- THE PRIEST
+// Father Horatio. The nun's recipe, her pivot, her tones: same feet, same bell, same 2 px ink, and
+// the gun hangs off the same hand. Everything that tells them apart is above the shoulders —
+// where she has a white coif RING around her head, he has a dark head over a white COLLAR BAND at
+// the neck, and his chest is bare cassock with the gold cross on it instead of her bone scapular.
+// Height ~30 px at s=1 (feet to crown).
+function drawPriest(c, x, y, s, o) {
+  o = o || {};
+  const facing = o.facing || 1, walk = o.walk || 0;
+  c.save();
+  c.translate(x, y);
+  c.scale(s * facing, s);
+  if (o.shadow !== false) shadow(c, 0, 0, 9, 3);
+  c.rotate(o.lean || 0);
+  c.lineJoin = 'round';
+  // shoes
+  const step = walk ? 1.5 : 0;
+  rrect(c, -7 + step, -3.2, 5.5, 3.2, 1.2, PAL.shoe, PAL.ink, 1);
+  rrect(c, 1.5 - step, -3.2, 5.5, 3.2, 1.2, PAL.shoe, PAL.ink, 1);
+  // cassock: the habit's bell, verbatim
+  c.beginPath();
+  c.moveTo(-5.2, -18.5); c.lineTo(5.2, -18.5);
+  c.quadraticCurveTo(9, -11, 9.8, -1.5);
+  c.quadraticCurveTo(0, 0.6, -9.8, -1.5);
+  c.quadraticCurveTo(-9, -11, -5.2, -18.5);
+  c.closePath();
+  c.fillStyle = PAL.habit; c.fill(); c.lineWidth = 2; c.strokeStyle = PAL.ink; c.stroke();
+  // cassock highlight (light from upper-left), same as hers
+  c.beginPath();
+  c.moveTo(-4.4, -17.5);
+  c.quadraticCurveTo(-7.6, -11, -8.2, -2.8);
+  c.lineTo(-5.6, -2.6);
+  c.quadraticCurveTo(-5.6, -11, -2.4, -17.5);
+  c.closePath();
+  c.fillStyle = PAL.habitHi; c.fill();
+  // the button placket, then the gold cross straight on the cloth
+  c.fillStyle = PAL.habitHi;
+  for (let i = 0; i < 4; i++) c.fillRect(-0.45, -16.2 + i * 3.2, 0.9, 0.9);
+  c.fillStyle = PAL.gold;   // a pectoral cross, hung low enough to clear the gun across his chest
+  c.fillRect(-0.9, -13.4, 1.8, 6.2);
+  c.fillRect(-2.9, -11.6, 5.8, 1.8);
+  // head: a dark brown crop where she has a ring of bone. The hair is drawn as a whole head and the
+  // face sits inside it, so what is left is a rim - thick over the crown, hairline thin at the jaw.
+  ell(c, 0, -25.2, 4.35, 4.9, PAL.hair, PAL.ink, 2);
+  ell(c, 0, -24.2, 3.7, 4.1, PAL.skin);
+  // the fringe, swept to his right, and the light from the upper-left on the crown
+  c.beginPath();
+  c.moveTo(-3.9, -26.7);
+  c.quadraticCurveTo(-1.0, -29.0, 3.4, -27.4);
+  c.quadraticCurveTo(0.0, -26.5, -3.7, -25.8);
+  c.closePath();
+  c.fillStyle = PAL.hair; c.fill();
+  c.beginPath();
+  c.moveTo(-3.8, -26.3);
+  c.quadraticCurveTo(-3.4, -28.8, -0.4, -29.6);
+  c.quadraticCurveTo(-1.9, -28.2, -2.4, -26.0);
+  c.closePath();
+  c.fillStyle = PAL.hairHi; c.fill();
+  // eyes, deadpan, at her spacing
+  c.fillStyle = PAL.eye;
+  c.fillRect(-2.4, -25.4, 1.5, 1.7);
+  c.fillRect(0.9, -25.4, 1.5, 1.7);
+  // THE COLLAR: a white band across the neck, over the chin, with the dark notch at the centre.
+  // This is the read at 1x - a bright bar at the neck instead of a bright ring at the head.
+  rrect(c, -4.9, -21.7, 9.8, 3.1, 0.9, PAL.bone, PAL.ink, 1.5);
+  c.fillStyle = PAL.habit; c.fillRect(-0.8, -21.1, 1.6, 2.5);
   c.restore();
 }
 
@@ -1705,14 +1831,18 @@ function drawGate(c, x, y, s, side, glow) {
 }
 
 // ---------------------------------------------------------------- composition
+// Both characters are drawn by the same recipe from here on: one body function, one gun, one set of
+// over/under and flip rules. Nothing downstream needs to know which of them it is holding.
+const CHAR_BODY = { nun: drawNun, priest: drawPriest };
+function drawCharBody(c, id, x, y, s, o) { (CHAR_BODY[id] || drawNun)(c, x, y, s, o); }
 // Gun OVER the body when aiming down (sin >= 0), UNDER when aiming up. Body flips when cos < 0.
-function drawNunWithGun(c, x, y, s, angle, pumpOffset, o) {
+function drawCharacterWithGun(id, c, x, y, s, angle, pumpOffset, o) {
   o = Object.assign({}, o || {});
   const facing = Math.cos(angle) < 0 ? -1 : 1;
   o.facing = facing;
   const hx = x + NUN_HAND.x * s * facing, hy = y + NUN_HAND.y * s;
-  if (Math.sin(angle) >= 0) { drawNun(c, x, y, s, o); drawGun(c, hx, hy, s, angle, pumpOffset); }
-  else { drawGun(c, hx, hy, s, angle, pumpOffset); drawNun(c, x, y, s, o); }
+  if (Math.sin(angle) >= 0) { drawCharBody(c, id, x, y, s, o); drawGun(c, hx, hy, s, angle, pumpOffset); }
+  else { drawGun(c, hx, hy, s, angle, pumpOffset); drawCharBody(c, id, x, y, s, o); }
 }
 
 // ---------------------------------------------------------------- pre-render
@@ -1723,6 +1853,7 @@ const SPR_K = 2;
 // foot = how far the feet sit below the entity's collision centre.
 const SPRITE_BOX = {
   nun: { w: 26, h: 38, ax: 13, ay: 35, sx: 9, sy: 3, foot: 14, draw: (c, x, y, f) => drawNun(c, x, y, 1, { facing: 1, walk: f }) },
+  priest: { w: 26, h: 38, ax: 13, ay: 35, sx: 9, sy: 3, foot: 14, draw: (c, x, y, f) => drawPriest(c, x, y, 1, { facing: 1, walk: f }) },
   restless: { w: 34, h: 34, ax: 14, ay: 31, sx: 8, sy: 2.6, foot: 12, draw: (c, x, y, f) => drawRestless(c, x, y, 1, f) },
   ghost: { w: 38, h: 36, ax: 17, ay: 32, sx: 0, sy: 0, foot: 12, alpha: 0.5, draw: (c, x, y, f) => drawGhost(c, x, y, 1, f) },
   yorick: { w: 20, h: 20, ax: 10, ay: 18, sx: 5, sy: 1.7, foot: 7, draw: (c, x, y, f) => drawYorick(c, x, y, 1, f) },
@@ -1788,12 +1919,14 @@ function drawVeilTrail(c, p) {
   c.lineWidth = 1.5; c.strokeStyle = PAL.ink; c.lineJoin = 'round'; c.stroke();
 }
 // pre-rendered body, procedural gun: the gun rotates to aim, over the body when aiming down and
-// under when aiming up; the body flips when the aim crosses vertical (the Designer's drawNunWithGun rule).
-function drawNunSprite(c, p) {
+// under when aiming up; the body flips when the aim crosses vertical (the drawCharacterWithGun rule).
+// The body blitted is whichever character this RUN was started as.
+function drawPlayerSprite(c, p) {
+  const id = runCharId();
   const feetY = p.y + NUN_FOOT;
   const facing = Math.cos(p.aim) < 0 ? -1 : 1;
   const frame = p.moving ? Math.floor(p.walkT * NUN_WALK_HZ) & 1 : 0;
-  drawVeilTrail(c, p);
+  if (id === 'nun') drawVeilTrail(c, p);   // a cassock has no veil to stream behind it
   // a cream ring on the flagstones: her footprint stays readable with a body standing on it
   c.strokeStyle = rgba(PAL.cream, CONFIG.NUN_RING_A); c.lineWidth = CONFIG.NUN_RING_LW;
   c.beginPath(); c.ellipse(p.x, feetY, CONFIG.NUN_RING_RX, CONFIG.NUN_RING_RY, 0, 0, TAU); c.stroke();
@@ -1804,7 +1937,7 @@ function drawNunSprite(c, p) {
   c.rotate(clamp(p.kvx / NUN_LEAN, -0.35, 0.35));                                   // lean into the recoil
   if (st > 0.01) { c.rotate(p.aim); c.scale(1 + st * NUN_STRETCH, 1 - st * NUN_SQUASH); c.rotate(-p.aim); }
   const pump = clamp((p.gunSlide || 0) / CONFIG.GUN_SLIDE_PX, 0, 1);
-  const body = () => blitBody(c, 'nun', frame, 0, 0, { face: facing });
+  const body = () => blitBody(c, id, frame, 0, 0, { face: facing });
   const gun = () => drawGun(c, NUN_HAND.x * facing, NUN_HAND.y, 1, p.aim, pump);
   if (Math.sin(p.aim) >= 0) { body(); gun(); } else { gun(); body(); }
   c.restore();
@@ -2670,6 +2803,44 @@ const hardUnlocked = () => unlocked('hardhabit');
 const hardMult = () => (G && G.hard ? CONFIG.HARD_MULT : 1);
 function hardPillRect() { return { x: CONFIG.HARD_PILL_X, y: CONFIG.HARD_PILL_Y, w: CONFIG.HARD_PILL_W, h: CONFIG.HARD_PILL_H }; }
 
+// ---- CHARACTER SELECT (the title poster only). The hero herself is a target, and so is the pill
+// under her feet; C does the same on a keyboard. The pill is sized for the LONGEST name there is,
+// so it never resizes under the finger that is tapping it.
+const charPillFont = () => FSANS(12);
+function charPillRect() {
+  const cap = Touch.on ? 0 : 28;   // the C keycap only exists where there is a C to press
+  // the WIDEST name, always: the pill must not jump under the finger that is toggling it
+  let nw = 0;
+  for (const d of CHARACTERS) nw = Math.max(nw, uiMeasure(ctx, d.name, charPillFont(), 1.6));
+  const w = Math.round(28 + cap + nw + 9 + uiMeasure(ctx, '⇄', FSANS(13), 0));
+  return { x: Math.round(CONFIG.TITLE_HERO_X - w / 2), y: CONFIG.CHAR_PILL_Y, w, h: CONFIG.CHAR_PILL_H };
+}
+function heroRect() {
+  const w = CONFIG.TITLE_HERO_W, h = CONFIG.TITLE_HERO_H;
+  return { x: CONFIG.TITLE_HERO_X - w / 2, y: CONFIG.TITLE_HERO_Y - h, w, h };
+}
+// the swap: a puff of bone off her shoulders, a soft tick, and the poster reads the other way
+function swapCharacter() {
+  const id = setCharId(otherCharId());
+  FX.burst(CONFIG.TITLE_HERO_X, CONFIG.TITLE_HERO_Y - 62, 22, {
+    color: [PAL.bone, PAL.cream, PAL.boneShade], minSpeed: 40, maxSpeed: 190,
+    minLife: 0.3, maxLife: 0.8, minSize: 2, maxSize: 4.5, grav: 150, drag: 0.9,
+  });
+  Audio.tick();
+  haptic(CONFIG.HAPTIC_FIRE);
+  return id;
+}
+function drawCharPill(c) {
+  const r = charPillRect(), d = charDef(charId()), m = Input.mouse, hot = inRect(r, m.x, m.y);
+  pill(c, r.x, r.y, r.w, r.h, 0.55);
+  rrect(c, r.x, r.y, r.w, r.h, Math.min(r.h / 2, 10), null, rgba(hot ? PAL.amber : PAL.cream, hot ? 0.7 : 0.3), 1.5);
+  const y = r.y + r.h / 2 + 4.5;
+  let x = r.x + 14;
+  if (!Touch.on) { keycap(c, x, r.y + 4, 'C', 20); x += 28; }
+  uiText(c, d.name, x, y, charPillFont(), hot ? PAL.amber : PAL.cream, 'left', { spacing: 1.6 });
+  uiText(c, '⇄', r.x + r.w - 12, y, FSANS(13), rgba(hot ? PAL.amber : PAL.cream, 0.7), 'right');
+}
+
 // ---- the card screen (geometry and drawing lifted from the Designer's ui-scratch.html)
 function cardRect(i) {
   const cw = CONFIG.CARD_W, gap = CONFIG.CARD_GAP;
@@ -2777,6 +2948,7 @@ function newGame() {
     entry: newEntry(),
     bankedKills: 0, bankedRun: false,
     picks: {}, cards: [], cardHover: -1, cardSel: -1, cardT: 0, cardShowT: -1e9, newUnlocks: [], hard: false,
+    character: charId(),   // whoever was chosen on the poster: the run keeps its own copy
   };
 }
 const STATES = {};
@@ -2837,7 +3009,7 @@ function drawWorld(c) {
   FX.draw(c);
   FX.drawFlashes(c);
   if (p.iframes > 0 && Math.floor(p.iframes * 16) % 2 === 1) c.globalAlpha = 0.45;
-  drawNunSprite(c, p);
+  drawPlayerSprite(c, p);
   c.globalAlpha = 1;
   drawTexts(c);
   c.restore();
@@ -3070,6 +3242,25 @@ function boardHighlightIndex() {
   for (let i = 0; i < rows.length; i++) if (rows[i].name === e.sentName && rows[i].score === e.sentScore) return i;
   return -1;
 }
+// one row's title + name, fitted to maxW. The title is a smaller, lighter thing than the name, and
+// the row gives ground in this order: shrink a step, shorten SISTER/FATHER to SR/FR, shrink again,
+// and only then cut the name with an ellipsis. Twelve characters plus a title always fit somehow.
+const TITLE_ABBR = { 'SISTER ': 'SR ', 'FATHER ': 'FR ' };
+function fitRowName(c, name, pre, maxW, px) {
+  const base = name.length > 9 ? 11 : name.length > 6 ? 13 : 15;
+  const prefs = pre && TITLE_ABBR[pre] ? [pre, TITLE_ABBR[pre]] : [pre];
+  const measure = (p, fs) => {
+    const pf = FSANS(px(Math.max(8, Math.round(fs * 0.78))), true), nf = FSANS(px(fs));
+    return { pf, nf, w: (p ? uiMeasure(c, p, pf, 0.5) + 3 : 0) + uiMeasure(c, name, nf, 1.5) };
+  };
+  for (let fs = base; fs >= 9; fs--) {
+    for (const p of prefs) { const m = measure(p, fs); if (m.w <= maxW) return { pre: p, name, pf: m.pf, nf: m.nf }; }
+  }
+  const p = prefs[prefs.length - 1], m = measure(p, 9);
+  const room = maxW - (p ? uiMeasure(c, p, m.pf, 0.5) + 3 : 0);
+  while (name.length > 1 && uiMeasure(c, name + '…', m.nf, 1.5) > room) name = name.slice(0, -1);
+  return { pre: p, name: name + '…', pf: m.pf, nf: m.nf };
+}
 function drawBoard(c, r, hi) {
   const cx = r.x + r.w / 2, k = clamp(r.w / 284, 0.75, 1.2);
   const px = (n) => Math.max(8, Math.round(n * k));
@@ -3094,11 +3285,17 @@ function drawBoard(c, r, hi) {
     if (on) rrect(c, r.x + 8, y - step * 0.68, r.w - 16, step, 4, rgba(PAL.amber, 0.16), rgba(PAL.amber, 0.55), 1.2);
     else if (i % 2 === 1) rrect(c, r.x + 10, y - step * 0.68, r.w - 20, step - 2, 4, 'rgba(244,240,230,0.045)');
     const lit = on || i === 0;
-    // 12 characters have to fit between the rank and the score: the name shrinks, it never spills
-    const nf = FSANS(px(e.name.length > 9 ? 11 : e.name.length > 6 ? 13 : 15));
-    uiText(c, String(i + 1), r.x + 34 * k, y, FSANS(px(11)), rgba(PAL.cream, lit ? 0.8 : 0.45), 'right', { spacing: 1 });
-    uiText(c, e.name, r.x + 42 * k, y, nf, lit ? PAL.amber : PAL.cream, 'left', { spacing: 1.5 });
-    uiText(c, fmt(e.score), r.x + r.w - 52 * k, y, FSANS(px(13)), lit ? PAL.amber : rgba(PAL.cream, 0.9), 'right', { spacing: 0 });
+    // SISTER/FATHER in front in a smaller, lighter weight, then the name in bold. The column runs
+    // from the rank to wherever the (right-aligned) score actually begins, and fitRowName() is what
+    // keeps a title and twelve characters inside it.
+    const sstr = fmt(e.score), sf = FSANS(px(13)), sx = r.x + r.w - 52 * k;
+    const nameX = r.x + 40 * k, maxW = sx - uiMeasure(c, sstr, sf, 0) - 8 * k - nameX;
+    const f = fitRowName(c, e.name, LB.titlePrefix(e.name, e.c), maxW, px);
+    uiText(c, String(i + 1), r.x + 32 * k, y, FSANS(px(11)), rgba(PAL.cream, lit ? 0.8 : 0.45), 'right', { spacing: 1 });
+    let nx = nameX;
+    if (f.pre) nx += uiText(c, f.pre, nx, y, f.pf, rgba(lit ? PAL.amber : PAL.cream, lit ? 0.8 : 0.5), 'left', { spacing: 0.5 }) + 3;
+    uiText(c, f.name, nx, y, f.nf, lit ? PAL.amber : PAL.cream, 'left', { spacing: 1.5 });
+    uiText(c, sstr, sx, y, sf, lit ? PAL.amber : rgba(PAL.cream, 0.9), 'right', { spacing: 0 });
     uiText(c, 'W' + (e.wave || 0), r.x + r.w - 12 * k, y, FSANS(px(10)), rgba(PAL.cream, 0.5), 'right', { spacing: 1 });
   }
 }
@@ -3143,11 +3340,12 @@ function kbLayout() {
   const fw = Math.min(CONFIG.KB_FIELD_W, KB.w - 40), fh = CONFIG.KB_FIELD_H, ph = CONFIG.KB_PILL_H;
   const y0 = KB.y + m;
   const field = { x: cx - fw / 2, y: y0 + 18, w: fw, h: fh };
-  const py = field.y + fh + 8, g = 14;
+  const py = field.y + fh + 22, g = 14;   // the 14 px of that gap is the live SISTER/FATHER preview
   return {
     rect: { x: KB.x, y: KB.y, w: KB.w, h: KB.h },
     titleY: y0 + 11,
     field,
+    previewY: field.y + fh + 11,
     submit: { x: cx - g / 2 - 104, y: py, w: 104, h: ph },
     skip: { x: cx + g / 2, y: py, w: 84, h: ph },
     hintY: py + ph + 14,
@@ -3165,10 +3363,11 @@ function nameEntryActive() { return !!(G && G.entry && G.entry.active); }
 function entryBaseY() { return G && G.state === 'WIN' ? 196 : (G ? G.overQY : 84) + 124; }
 function entryLayout() {
   const W = CONFIG.W, fw = CONFIG.LB_FIELD_W, fh = CONFIG.LB_FIELD_H, y = entryBaseY();
-  const py = y + fh + 14, ph = CONFIG.LB_PILL_H, g = CONFIG.LB_PILL_GAP;
+  const py = y + fh + 30, ph = CONFIG.LB_PILL_H, g = CONFIG.LB_PILL_GAP;   // 16 px of that is the preview
   return {
     y,
     field: { x: W / 2 - fw / 2, y, w: fw, h: fh },
+    previewY: y + fh + 16,
     submit: { x: W / 2 - g / 2 - 116, y: py, w: 116, h: ph },
     skip: { x: W / 2 + g / 2, y: py, w: 96, h: ph },
     hintY: py + ph + 20,
@@ -3335,7 +3534,7 @@ function submitEntry() {
   Save.data.playerName = name; Save.save();
   hideNameInput();
   Audio.click();
-  LB.submit(name, score, wave).then((okd) => {
+  LB.submit(name, score, wave, charDef(G.character).c).then((okd) => {
     if (!okd) { e.pending = false; e.msg = 'THE HOLY ORDER COULD NOT BE REACHED'; return null; }
     // the board so the row can be picked out, and one aggregation call for the EXACT rank: the
     // count of scores strictly above this one, plus one. If that fails, the top ten answers instead.
@@ -3387,11 +3586,21 @@ function drawNameField(c, r, name, hot, fs) {
   c.fillRect(bx + w + 2, r.y + r.h * 0.22, 2, r.h * 0.56);
   uiText(c, name.length + '/' + LB.nameMax, r.x + r.w - 8, r.y + r.h - 7, FSANS(Math.max(8, Math.round(f * 0.34))), rgba(PAL.cream, 0.4), 'right', { spacing: 1 });
 }
+// what the board will actually call her: the title comes from the character she just played, and a
+// name that already opens with one of its own keeps it.
+function entryPreview() {
+  const n = LB.cleanName(G.entry.name), c = charDef(G.character).c;
+  return '→ ' + (n ? LB.displayName(n, c) : LB.titlePrefix('', c).trim());
+}
+function drawEntryPreview(c, x, y, fs) {
+  uiText(c, entryPreview(), x, y, FSANS(fs || 12), rgba(PAL.amber, 0.8), 'center', { spacing: 2 });
+}
 // the entry on the CARD, in arena px: the normal place for it, keyboard down
 function drawNameEntry(c) {
   const e = G.entry, L = entryLayout(), W = CONFIG.W, m = Input.mouse;
   uiText(c, 'ENTER YOUR NAME', W / 2, L.y - 16, FSANS(12), rgba(PAL.cream, 0.6), 'center', { spacing: 4 });
   drawNameField(c, L.field, e.name, true, 26);
+  drawEntryPreview(c, W / 2, L.previewY, 13);
   drawEntryPill(c, L.submit, 'SUBMIT', inRect(L.submit, m.x, m.y));
   drawEntryPill(c, L.skip, 'SKIP', inRect(L.skip, m.x, m.y));
   const hint = Touch.on ? 'TAP TO TYPE  ·  SUBMIT OR SKIP' : 'TYPE  ·  BACKSPACE  ·  ENTER TO SUBMIT  ·  ESC TO SKIP';
@@ -3409,6 +3618,7 @@ function drawEntryOverlay(c) {
   rrect(c, r.x + 6, r.y + 4, r.w - 12, Math.min(r.h - 8, kb.hintY - r.y + 8), 10, 'rgba(7,7,13,0.9)', rgba(PAL.cream, 0.18), 1.5);
   uiText(c, 'ENTER YOUR NAME', r.x + r.w / 2, kb.titleY, FSANS(11), rgba(PAL.cream, 0.65), 'center', { spacing: 4 });
   drawNameField(c, kb.field, e.name, true, 22);
+  drawEntryPreview(c, r.x + r.w / 2, kb.previewY, 11);
   drawEntryPill(c, kb.submit, 'SUBMIT', inRect(kb.submit, m.cx, m.cy), 13);
   drawEntryPill(c, kb.skip, 'SKIP', inRect(kb.skip, m.cx, m.cy), 13);
   if (kb.hintY < r.y + r.h - 4) uiText(c, 'DONE ON THE KEYBOARD SUBMITS', r.x + r.w / 2, kb.hintY, FSANS(10), rgba(PAL.cream, 0.45), 'center', { spacing: 2 });
@@ -3441,11 +3651,14 @@ function drawEndBoard(c) {
 function endCardPill() { return Input.pressed('Escape') || uiTapped('pill:title'); }
 
 STATES.TITLE = {
-  enter() { Input.endTick(); hideNameInput(); LB.fetchTop(); },
-  update() {
+  enter() { Input.endTick(); hideNameInput(); FX.reset(); LB.fetchTop(); },
+  update(dt) {
     // the HARD HABIT pill is its own target, so the toggle never starts a run by accident
     if (hardUnlocked() && (Input.pressed('KeyH') || uiTapped('hard'))) { Opt.hard = !Opt.hard; Audio.click(); return; }
     if (showA2HS() && uiTapped('a2hs')) { hintDismiss('a2hs'); Audio.click(); return; }   // the small x
+    // ...and neither does the character swap: the hero and her pill are targets of their own
+    if (Input.pressed('KeyC') || uiTapped('hero') || uiTapped('pill:char')) { swapCharacter(); return; }
+    FX.update(dt);   // the poster is the only screen outside play that has particles of its own
     if (Input.anyStart()) { startRun(); return; }
   },
   // the poster (ui-scratch.html): torchlit courtyard, the dead at the gates, the hero at 4.6x
@@ -3465,15 +3678,17 @@ STATES.TITLE = {
     drawYorick(c, 60, 470, 2.2, 1); drawYorick(c, 96, 456, 2.2, 0);
     c.restore();
     // hero. Pulled down and in a touch (4.6 -> 4.05) so the board has the right shoulder of the
-    // poster to itself and her head still clears its bottom edge.
-    drawNunWithGun(c, 762, 502, 4.05, Math.PI - 0.55, 0.2);
+    // poster to itself and her head still clears its bottom edge. Tap her to change who she is.
+    drawCharacterWithGun(charId(), c, CONFIG.TITLE_HERO_X, CONFIG.TITLE_HERO_Y, CONFIG.TITLE_HERO_S, Math.PI - 0.55, 0.2);
+    FX.draw(c);   // the bone puff off the last swap
+    drawCharPill(c);
     // the global top ten, pinned over the right-hand gate
     drawBoard(c, boardRect(), -1);
     // poster text
     uiText(c, 'GET THEE TO', 72, 150, FSERIF(56), PAL.cream, 'left', { shadow: 3, spacing: 1 });
     uiText(c, 'A NUNNERY', 68, 244, FSERIF(86), PAL.cream, 'left', { shadow: 4 });   // 98 -> 86: the board needs the right shoulder
     rule(c, 72, 262, 380);
-    uiText(c, 'She took the advice.', 74, 302, FSERIF(28, true), PAL.amber, 'left', { shadow: 2 });
+    uiText(c, charDef(charId()).pronounSub, 74, 302, FSERIF(28, true), PAL.amber, 'left', { shadow: 2 });
     const hint = Touch.on ? 'LEFT THUMB MOVE   ·   RIGHT THUMB DRAG TO AIM, RELEASE TO FIRE   ·   TAP TO BEGIN' : 'WASD MOVE   ·   MOUSE AIM   ·   CLICK TO BEGIN';
     uiText(c, hint, 74, 350, FSANS(13), rgba(PAL.cream, pulse(t, 0.7, 0.5, 1)), 'left', { spacing: 2, shadow: 1 });
     // a home-screen web app opens with no audio session at all: one tap is all it takes
@@ -3488,13 +3703,16 @@ STATES.TITLE = {
     const s = Save.data;
     uiText(c, 'BEST ' + fmt(s.hi) + '   ·   WAVE ' + (s.bestWave || 0), 72, 504, FSANS(14), rgba(PAL.cream, 0.85), 'left', { spacing: 1.5, shadow: 1 });
     // the touch build has a mute button on the canvas; the keycap hint would be a lie there
+    // the M keycap used to sit in the bottom-right corner; the character pill has that corner now,
+    // so it moved up into the gap between the board's bottom edge and the hero's head.
     if (!Touch.on) {
+      const my = CONFIG.TITLE_MUTE_Y;
       const mlab = Audio.muted ? 'MUTED' : 'MUTE';
       const mw = uiMeasure(c, mlab, FSANS(12), 2);
-      keycap(c, W - 72 - mw - 30, 486, 'M', 20);
-      uiText(c, mlab, W - 72, 502, FSANS(12), Audio.muted ? PAL.amber : rgba(PAL.cream, 0.7), 'right', { spacing: 2 });
+      keycap(c, W - 72 - mw - 30, my, 'M', 20);
+      uiText(c, mlab, W - 72, my + 16, FSANS(12), Audio.muted ? PAL.amber : rgba(PAL.cream, 0.7), 'right', { spacing: 2 });
       // a gesture has been and gone and the context still is not running: the same amber pip
-      if (Audio.gestured && Audio.needsUnlock) ell(c, W - 65, 491, 3, 3, PAL.amber, PAL.ink, 1);
+      if (Audio.gestured && Audio.needsUnlock) ell(c, W - 65, my + 5, 3, 3, PAL.amber, PAL.ink, 1);
     }
     if (showA2HS()) drawA2HS(c);
   },
@@ -3635,7 +3853,7 @@ function drawWin(c, t, d) {
   // again once the board arrived: she keeps clear of the board's right edge AND of the TITLE pill
   drawShadow(c, 712, 486, 14, 4);
   drawCrown(c, 712, 484, 3.2, 0.35);
-  drawNunWithGun(c, 772, 488, 3, Math.PI - 1.05, 0);
+  drawCharacterWithGun(runCharId(), c, 772, 488, 3, Math.PI - 1.05, 0);
   // the banner is up at the top now: the middle of the card belongs to THE HOLY ORDER
   rrect(c, W / 2 - 370, 52, 740, 100, 8, 'rgba(7,7,13,0.55)');
   uiText(c, 'THE REST IS SILENCE.', W / 2, 104, FSERIF(44), PAL.cream, 'center', { shadow: 3, spacing: 1 });
@@ -3689,7 +3907,7 @@ STATES.GAMEOVER = {
     Input.endTick();
     bankRun(false);
     G.texts.length = 0;   // neither state ticks updateTexts: a callout caught mid-flight would hang forever
-    G.quote = pick(QUOTES); G.overT = 0;
+    G.quote = charQuote(pick(QUOTES), G.character); G.overT = 0;   // the priest is never a sweet nun
     // the quote wrap decides where everything under it sits, and update() needs that before draw() runs
     G.overQY = overQuoteY(ctx, G.quote);
     beginNameEntry();
@@ -3833,10 +4051,20 @@ const GAME = {
   get sticks() { return touchSnapshot(); },
   get rotatePrompt() { return rotateBlocked(); },
   // ---- THE HOLY ORDER. Plain values: the harness reads the whole board in one evaluate.
-  get leaderboard() { return { available: LB.available(), status: LB.status(), top: LB.top ? LB.top.map((r) => ({ name: r.name, score: r.score, wave: r.wave })) : null, lastError: LB.lastError }; },
+  get leaderboard() { return { available: LB.available(), status: LB.status(), top: LB.top ? LB.top.map((r) => ({ name: r.name, score: r.score, wave: r.wave, c: r.c, display: LB.displayName(r.name, r.c) })) : null, lastError: LB.lastError }; },
   get leaderboardCollection() { return LB.collection; }, set leaderboardCollection(v) { LB.collection = v; },
   refreshLeaderboard(force) { LB.fetchTop(force !== false); return true; },
-  submitScore(name, score, wave) { return LB.submit(name, score, wave); },
+  submitScore(name, score, wave, c) { return LB.submit(name, score, wave, c); },
+  // ---- the two of the Order. `character` is the SELECTION (and the run, while one is going).
+  get character() { return charId(); },
+  set character(v) { setCharId(v); },
+  get characters() { return CHARACTERS.map((d) => ({ id: d.id, c: d.c, name: d.name, title: d.title })); },
+  get characterInfo() {
+    const d = charDef(charId());
+    return { id: d.id, c: d.c, name: d.name, title: d.title, subtitle: d.pronounSub, run: runCharId(), hero: heroRect(), pill: charPillRect() };
+  },
+  swapCharacter() { return swapCharacter(); },
+  displayName(name, c) { return LB.displayName(name, c); },
   get nameEntry() { const e = G.entry; return { active: e.active, done: e.done, sent: e.sent, pending: e.pending, name: e.name, len: e.name.length, msg: e.msg, rank: e.rank, sentName: e.sentName }; },
   get entryUI() { const L = entryLayout(); return { field: L.field, submit: L.submit, skip: L.skip, hintY: L.hintY }; },   // arena px
   get playerName() { return Save.data.playerName; },

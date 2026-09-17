@@ -3,6 +3,10 @@
 *She took the advice.* Ophelia went to the nunnery; the restless dead of Elsinore followed her there.
 One walled courtyard, one pump-action shotgun, ten waves, a boss, and an Encore.
 
+Two of the Order can hold that shotgun: **SISTER OPHELIA**, and **FATHER HORATIO**, a priest in a black
+cassock and a white collar. Tap the hero on the title poster (or the pill under her, or press **C**) to
+swap. It is **cosmetic only** — same gun, same stats, same waves — and the choice is remembered.
+
 The shotgun kicks her backwards. **Every shot is also a dodge** — retreat and fire and you fly, charge and fire and you stall.
 
 ## Play
@@ -24,6 +28,7 @@ simply not there — the game is still the same single file with nothing to inst
 | 1 / 2 / 3 or click | Pick a Blessing between waves |
 | Esc / P | Pause |
 | M | Mute (persisted) |
+| C, or click the hero / the pill under her | Swap between SISTER OPHELIA and FATHER HORATIO on the title screen |
 | H | HARD HABIT toggle on the title screen (unlocked by winning) |
 | Enter / Space / click | Start, retry, take the Encore |
 | A–Z, 0–9, space, Backspace, Enter, Esc | Name entry on the end card — type, submit (Enter), or skip (Esc) |
@@ -47,6 +52,7 @@ real fullscreen and a landscape lock. (iOS Safari has no Fullscreen API: it gets
 | Lift the right thumb while aimed | **Fire one shell** down that line (flick to fire) |
 | Pull the right thumb back to the middle, then lift | Cancel — no shot |
 | Tap the right half | One shell down the current aim |
+| Tap the hero on the title, or the pill under her | Swap between SISTER OPHELIA and FATHER HORATIO |
 | ⏸ / speaker / ⛶ buttons | Pause · Mute · Fullscreen — top right in play, top **left** on the title (THE HOLY ORDER has the right shoulder of the poster). Fullscreen is hidden where the browser has no Fullscreen API |
 | FIRE: FLICK ⇄ HOLD pill on the pause card | Switch to the old hold-to-fire trigger (persisted) |
 | Tap anywhere | Start, pick a Blessing, resume, retry, take the Encore |
@@ -60,6 +66,25 @@ trigger. Released and tapped shots get a small aim assist (10°, inside pellet r
 aim still connects. Short haptic taps on firing, on the release shot, and on taking a hit (off while
 muted).
 
+## The two of the Order
+
+The player is **SISTER OPHELIA** (default) or **FATHER HORATIO**. The poster's hero *is* the switch: tap
+or click her, or the `SISTER OPHELIA ⇄` pill under her feet, or press **C**. She changes in a puff of
+bone with a soft tick, the subtitle swaps to *He took the advice.*, and the choice is saved
+(`save.character`) and used for the next run. Both are targets of the canvas tap layer (`hero`,
+`pill:char`), so the swap is a press **and** a release on the same thing and never starts a run by
+accident.
+
+The priest is drawn by the same procedural recipe as the nun, at the same pivot, in the same tones: black
+cassock with her bell silhouette, a **white clerical collar with a dark notch** where she has her white
+coif ring, short dark-brown hair, a gold pectoral cross on the cloth, two dark shoes — and no veil to
+trail behind him. He is pre-rendered the same way (both frames plus a white silhouette, at 2x) and reads
+as a priest at 1x in a crowd (`tools/shots/char-1x.png` puts the two side by side on the flagstones).
+
+Nothing about him is a stat: the gun, the recoil, the hearts and the Blessings are identical. What
+changes is flavour — the subtitle, two of the six game-over quotes (*Goodnight, sweet nun.* becomes
+*Goodnight, padre.*; *Alas, poor Ophelia.* becomes *Alas, poor Horatio.*) — and the title on the board.
+
 ## THE HOLY ORDER — the global leaderboard
 
 The title poster carries a pinned bill of the **global top ten**: rank · name · score · wave, under a
@@ -68,6 +93,14 @@ that ten, and the GAME OVER (and ENCORE) card asks for a name — **1 to 12 char
 single spaces**, uppercased, trimmed, no leading space, prefilled with the last one you used. Type
 and press Enter on a keyboard; on a phone, tap the field to raise the on-screen keyboard and use
 *done*, or the SUBMIT / SKIP pills.
+
+**Titles on the board.** The score document carries a character flag `c` (`0` nun, `1` priest) and the
+panel puts **SISTER** or **FATHER** in front of the name in a smaller, lighter weight — never on the wire,
+only on the board, and never twice: a name that already opens with a title word (`SISTER`, `SR`, `FATHER`,
+`FR`, `BROTHER`, `BR`, `MOTHER`, `ABBESS`, `FRIAR`) keeps the one its owner typed, and a row from before
+`c` existed reads as a SISTER. A row that will not fit gives ground in order — a size down, then `SR`/`FR`
+for the title, then a size down again, and only then an ellipsis on the name. The name entry shows the
+result live under the field: **→ FATHER DAVE**.
 
 **The board then stays on the card.** After SUBMIT or SKIP — and straight away when there is no entry
 to offer — the same top-ten panel is drawn on the end card with your row picked out in amber, and
@@ -97,8 +130,8 @@ document, and a `:runAggregationQuery` that counts the scores strictly above you
 name an exact rank (rank = count + 1; if it fails, the top ten answers instead). The project id and
 API key in `CONFIG.LEADERBOARD` are public by design — the server's security rules are the real
 guard: anyone may read, anyone may create exactly
-`{name: /^[A-Z0-9][A-Z0-9 ]{0,11}$/, score: 0…2,000,000, wave: 1…200, v: int}`, and nothing may ever
-be changed or deleted. The client enforces that same name regex before it posts.
+`{name: /^[A-Z0-9][A-Z0-9 ]{0,11}$/, score: 0…2,000,000, wave: 1…200, v: int, c: 0|1 optional}`, and
+nothing may ever be changed or deleted. The client enforces that same name regex before it posts.
 
 Three rules hold the whole thing together, and `tools/lb-smoke.mjs` enforces them:
 
@@ -122,10 +155,13 @@ Add `?debug=1` to the URL, or press the backtick key, to toggle the debug overla
 
 `window.GAME` is the same handle the test harness drives: `startRun()`, `skipToWave(n)`, `spawn(type, n)`, `spawnAt(type, x, y)`, `killAll()`, `forceCards()`, `pickCard(i)`, `setGod(b)`, `setTimeScale(x)`, `snapshot()`, plus `touchMode` (get/set), `touchFireMode` (get/set: `'flick'` | `'hold'`), `sticks`, `touchButtons`, `firePill`, `fullscreen`, `fullscreenAvailable` and `rotatePrompt` for the touch build.
 For the leaderboard: `leaderboard` (`{available, status, top, lastError}`), `leaderboardCollection` (get/set),
-`refreshLeaderboard(force)`, `submitScore(name, score, wave)`, `cleanName(s)`, `validName(s)`, `nameEntry`, `entryUI`,
+`refreshLeaderboard(force)`, `submitScore(name, score, wave, c)` (`c` defaults to the current character),
+`displayName(name, c)`, `cleanName(s)`, `validName(s)`, `nameEntry`, `entryUI`,
 `playerName` (`initials` is kept as an alias), `endCard` (`{board, rect, highlight, rank, rankLine, titlePill}`),
 `keyboard` (`{up, entryUp, rect, layoutH, layout}`), `debugKeyboardRect(h)` to fake a shrunken visual viewport, and
-`forceGameOver(score, wave)` to land straight on an end card with a chosen score.
+`forceGameOver(score, wave)` to land straight on an end card with a chosen score. For the characters:
+`character` (get/set: `'nun'` | `'priest'`), `characters`, `characterInfo` (`{id, c, name, title, subtitle,
+run, hero, pill}` — the last two are the title poster's tap targets in arena px) and `swapCharacter()`.
 
 ## Tests
 
@@ -139,7 +175,8 @@ node tools/lb-smoke.mjs                       # THE HOLY ORDER -> "ALL LEADERBOA
 node tools/lb-smoke.mjs --live                # ...and the same, plus a real round trip to `scores_test`
 ```
 
-The smoke test loads the page, plays it through real input, forces the card screen, stress-tests 80 enemies, dies, retries, and reloads to check the high score survived. The touch test runs an 844×390 phone viewport with CDP touch emulation: it checks the canvas fills the glass and the arena is letterboxed inside it, drives a move stick planted on a letterbox bar, flicks to fire (and cancels), taps to fire, checks the aim assist snaps onto a body 6° off the drag, runs the hold-mode trigger, uses the screen-space buttons and the pause-card FIRE pill (which must survive a reload), and checks the portrait rotate prompt. The leaderboard test serves `index.html` from a throwaway localhost server (the board only exists over http(s)) and
+The smoke test loads the page, plays it through real input, forces the card screen, stress-tests 80 enemies, dies, retries, and reloads to check the high score survived. The touch test runs an 844×390 phone viewport with CDP touch emulation: it checks the canvas fills the glass and the arena is letterboxed inside it, drives a move stick planted on a letterbox bar, flicks to fire (and cancels), taps to fire, checks the aim assist snaps onto a body 6° off the drag, runs the hold-mode trigger, uses the screen-space buttons and the pause-card FIRE pill (which must survive a reload), checks that tapping the title hero swaps to FATHER HORATIO (subtitle and all) without starting a run and
+that the pill swaps back, and checks the portrait rotate prompt. The leaderboard test serves `index.html` from a throwaway localhost server (the board only exists over http(s)) and
 installs a `fetch` mock that answers `:runQuery` with a canned top ten, `:runAggregationQuery` with a canned count of 36,
 and records every submit. It checks the title panel, the name rules against the server regex, desktop typing (letters,
 digits, one interior space, backspace, the twelve-character ceiling), the phone path — the hidden `<input>` really does
@@ -148,7 +185,9 @@ keyboard-aware layout (via `GAME.debugKeyboardRect(150)`, since CDP cannot shrin
 submits exactly one document with exactly the four expected fields, that the one aggregation call turns a count of 36
 into *#37*, that the board lands on the game-over card with her row highlighted, that the TITLE pill and Esc reach the
 title, that a small score gets no entry, that SKIP sends nothing even though the blur it causes fires a `change` event,
-and that going offline — or having the host blocked outright — is completely silent. `--live` adds a real read of the
+that `SISTER`/`FATHER` lands in front of the right names (and never in front of a name that brought its
+own title), that a priest's submit carries `"c":{"integerValue":"1"}` and a nun's carries `"0"`, and that
+going offline — or having the host blocked outright — is completely silent. `--live` adds a real read of the
 live board, one twelve-character write into the `scores_test` collection and a real aggregation query, read back
 independently from Node.
 
